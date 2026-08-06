@@ -233,6 +233,15 @@ oc create secret generic memoryhub-db-credentials \
     $RERANKER_ARGS \
     --dry-run=client -o json | oc apply --context "$CONTEXT" -f - -n "$NAMESPACE"
 echo "OK: memoryhub-db-credentials Secret created/updated in $NAMESPACE"
+
+# Verify MinIO credentials exist (copied from memoryhub-storage by deploy-full.sh)
+if ! oc get secret --context "$CONTEXT" memoryhub-minio-credentials -n "$NAMESPACE" &>/dev/null; then
+    echo "  WARNING: Secret memoryhub-minio-credentials not found in $NAMESPACE."
+    echo "  MinIO credentials must be copied from memoryhub-storage namespace."
+    echo "  Run scripts/deploy-full.sh or manually copy the secret."
+    echo "  S3 storage will not work until this secret is present."
+fi
+
 apply_manifest
 
 # Step 4: Start binary build

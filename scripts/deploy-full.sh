@@ -1,8 +1,8 @@
 #!/bin/bash
 # Full MemoryHub stack deployment to OpenShift.
-# Usage: scripts/deploy-full.sh [--skip-prereqs] [--skip-db] [--skip-migrations]
-#                                [--skip-mcp] [--skip-auth] [--skip-ui] [--skip-tile]
-#                                [--skip-models] [--gpu-models]
+# Usage: scripts/deploy-full.sh [--skip-prereqs] [--skip-db] [--skip-storage]
+#                                [--skip-migrations] [--skip-mcp] [--skip-auth]
+#                                [--skip-ui] [--skip-tile] [--skip-models] [--gpu-models]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +17,7 @@ UI_NAMESPACE="memoryhub-ui"
 RHOAI_NAMESPACE="redhat-ods-applications"
 EMBEDDING_MODEL_NAMESPACE="embedding-model"
 RERANKER_MODEL_NAMESPACE="reranker-model"
+STORAGE_NAMESPACE="memoryhub-storage"
 DB_POD_LABEL="app.kubernetes.io/name=memoryhub-pg"
 
 SKIP_PREREQS=false
@@ -28,6 +29,7 @@ SKIP_UI=false
 SKIP_TILE=false
 SKIP_MODELS=false
 GPU_MODELS=false
+SKIP_STORAGE=false
 SKIP_SMOKE_TEST=false
 RESTORE_FROM=""
 
@@ -113,6 +115,7 @@ parse_args() {
             --skip-ui)         SKIP_UI=true ;;
             --skip-tile)       SKIP_TILE=true ;;
             --skip-models)     SKIP_MODELS=true ;;
+            --skip-storage)    SKIP_STORAGE=true ;;
             --gpu-models)      GPU_MODELS=true ;;
             --skip-smoke-test) SKIP_SMOKE_TEST=true ;;
             --restore-from)
@@ -136,6 +139,7 @@ parse_args() {
                 echo "  --skip-ui          Skip UI deployment"
                 echo "  --skip-tile        Skip RHOAI OdhApplication tile"
                 echo "  --skip-models      Skip embedding + reranker model deployment"
+                echo "  --skip-storage     Skip MinIO object storage deployment"
                 echo "  --gpu-models       Use GPU model manifests instead of CPU (default: CPU)"
                 echo "  --skip-smoke-test  Skip post-deploy write/search/read verification"
                 echo "  --restore-from F   Restore database from a pg_dump file after DB deploy"
@@ -201,7 +205,7 @@ preflight() {
     echo "    PostgreSQL:  $([ "$SKIP_DB" = true ] && echo "skip" || echo "deploy")"
     echo "    Migrations:  $([ "$SKIP_MIGRATIONS" = true ] && echo "skip" || echo "run")"
     echo "    MCP server:  $([ "$SKIP_MCP" = true ] && echo "skip" || echo "deploy")"
-    echo "    MinIO:       $([ "$SKIP_MCP" = true ] && echo "skip" || echo "deploy")"
+    echo "    MinIO:       $([ "$SKIP_STORAGE" = true ] && echo "skip" || echo "deploy")"
     echo "    Valkey:      $([ "$SKIP_MCP" = true ] && echo "skip" || echo "deploy")"
     echo "    Models:      $([ "$SKIP_MODELS" = true ] && echo "skip" || ([ "$GPU_MODELS" = true ] && echo "deploy (GPU)" || echo "deploy (CPU)"))"
     echo "    Auth server: $([ "$SKIP_AUTH" = true ] && echo "skip" || echo "deploy")"
@@ -333,35 +337,63 @@ run_migrations() {
 }
 
 # ---------------------------------------------------------------------------
-# Section 3b: MinIO + Valkey infrastructure (MCP dependencies)
+# Section 3b: MinIO object storage (memoryhub-storage namespace)
 # ---------------------------------------------------------------------------
-deploy_infra() {
-    banner "3b. MinIO + Valkey"
+deploy_storage() {
+    banner "3b. MinIO Object Storage"
 
-    if [ "$SKIP_MCP" = true ]; then
-        skipped "Infrastructure (MCP skipped)"
+    if [ "$SKIP_STORAGE" = true ]; then
+        skipped "MinIO (--skip-storage)"
         return 0
     fi
 
-    # Ensure MCP namespace exists (MCP deploy script also does this, but we
-    # need it now for MinIO/Valkey which must be ready before MCP starts)
+    # The kustomization includes namespace.yaml, but we need the namespace
+    # to exist before we can grant SCCs, so create it imperatively first.
+    if ! oc get namespace --context "$CONTEXT" "$STORAGE_NAMESPACE" &>/dev/null; then
+        info "Creating namespace $STORAGE_NAMESPACE..."
+        oc create namespace --context "$CONTEXT" "$STORAGE_NAMESPACE"
+    fi
+
+    info "Deploying MinIO..."
+    oc apply --context "$CONTEXT" -k "$REPO_ROOT/deploy/minio/"
+    oc adm policy --context "$CONTEXT" add-scc-to-user anyuid -z memoryhub-minio -n "$STORAGE_NAMESPACE"
+
+    info "Waiting for MinIO rollout..."
+    if ! oc rollout --context "$CONTEXT" status deployment/memoryhub-minio -n "$STORAGE_NAMESPACE" --timeout=120s; then
+        die "MinIO did not become ready. Check: oc describe deployment/memoryhub-minio -n $STORAGE_NAMESPACE"
+    fi
+
+    # Copy MinIO credentials to the MCP namespace so the MCP server and
+    # retention cronjob can reference the secret locally.
+    if ! oc get namespace --context "$CONTEXT" "$MCP_PROJECT" &>/dev/null; then
+        info "Creating namespace $MCP_PROJECT (for cross-namespace secret copy)..."
+        oc create namespace --context "$CONTEXT" "$MCP_PROJECT"
+    fi
+    copy_secret memoryhub-minio-credentials "$STORAGE_NAMESPACE" memoryhub-minio-credentials "$MCP_PROJECT"
+
+    echo ""
+    echo -e "  ${GREEN}MinIO ready${RESET}"
+}
+
+# ---------------------------------------------------------------------------
+# Section 3b2: Valkey (MCP namespace, ephemeral cache)
+# ---------------------------------------------------------------------------
+deploy_valkey() {
+    banner "3b2. Valkey"
+
+    if [ "$SKIP_MCP" = true ]; then
+        skipped "Valkey (MCP skipped)"
+        return 0
+    fi
+
     if ! oc get namespace --context "$CONTEXT" "$MCP_PROJECT" &>/dev/null; then
         info "Creating namespace $MCP_PROJECT..."
         oc create namespace --context "$CONTEXT" "$MCP_PROJECT"
     fi
 
-    info "Deploying MinIO..."
-    oc apply --context "$CONTEXT" -k "$REPO_ROOT/deploy/minio/" -n "$MCP_PROJECT"
-    oc adm policy --context "$CONTEXT" add-scc-to-user anyuid -z memoryhub-minio -n "$MCP_PROJECT"
-
     info "Deploying Valkey..."
     oc apply --context "$CONTEXT" -k "$REPO_ROOT/deploy/valkey/" -n "$MCP_PROJECT"
     oc adm policy --context "$CONTEXT" add-scc-to-user anyuid -z memoryhub-valkey -n "$MCP_PROJECT"
-
-    info "Waiting for MinIO rollout..."
-    if ! oc rollout --context "$CONTEXT" status deployment/memoryhub-minio -n "$MCP_PROJECT" --timeout=120s; then
-        die "MinIO did not become ready. Check: oc describe deployment/memoryhub-minio -n $MCP_PROJECT"
-    fi
 
     info "Waiting for Valkey rollout..."
     if ! oc rollout --context "$CONTEXT" status deployment/memoryhub-valkey -n "$MCP_PROJECT" --timeout=120s; then
@@ -369,7 +401,7 @@ deploy_infra() {
     fi
 
     echo ""
-    echo -e "  ${GREEN}MinIO + Valkey ready${RESET}"
+    echo -e "  ${GREEN}Valkey ready${RESET}"
 }
 
 # ---------------------------------------------------------------------------
@@ -923,7 +955,8 @@ main() {
     deploy_postgresql
     restore_from_backup
     run_migrations
-    deploy_infra              # MinIO + Valkey before MCP
+    deploy_storage            # MinIO in memoryhub-storage namespace
+    deploy_valkey             # Valkey in MCP namespace (ephemeral)
     deploy_models             # Embedding + Reranker before MCP
     deploy_retention_cronjob  # Retention sweep after DB
     prepare_auth_infra        # Secrets before auth

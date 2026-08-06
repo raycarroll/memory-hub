@@ -116,6 +116,7 @@ Where credentials live and how to use them. This eliminates "secrets archaeology
 | Secret | Namespace | Keys | Used by |
 |--------|-----------|------|---------|
 | `memoryhub-pg-credentials` | `memoryhub-db` | `POSTGRES_PASSWORD` | DB access across all services |
+| `memoryhub-minio-credentials` | `memoryhub-storage` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | MinIO S3 auth; copied to `memory-hub-mcp` by deploy-full.sh |
 | `gemini-api-key` | `memory-hub-mcp` | `api-key` | MCP server extraction LLM auth |
 | `gemini-api-key` | `memoryhub-eval` | `api-key` | EvalHub adapter answer/judge LLM auth |
 | `evalhub-db-credentials` | `memoryhub-eval` | `db-url` | EvalHub PostgreSQL connection |
@@ -156,11 +157,12 @@ Every change must be deployable from code without manual steps. When implementin
 
 **SCC grants** — MinIO and Valkey require `anyuid` SCC on their ServiceAccounts. The deploy script must grant this after applying the kustomize manifests. Without it, pods fail with SCC validation errors on fresh namespaces.
 
-**The golden test** — There are two variants, both must pass with zero manual intervention:
-- **Preserve-DB** (most common): `scripts/uninstall-full.sh --skip-db --yes && scripts/deploy-full.sh`
+**The golden test** — There are three variants; the first two must pass with zero manual intervention:
+- **Preserve-data** (recommended): `scripts/uninstall-full.sh --skip-data --yes && scripts/deploy-full.sh`
+- **Preserve-DB** (legacy, DB only): `scripts/uninstall-full.sh --skip-db --yes && scripts/deploy-full.sh`
 - **Full fresh**: `scripts/uninstall-full.sh --yes && scripts/deploy-full.sh`
 
-The preserve-DB variant is the default smoke test after infrastructure changes. The full-fresh variant tests first-install password generation and DB bootstrap. If either fails, `deploy-full.sh` is incomplete. Run the preserve-DB variant before marking any infrastructure change as done.
+The preserve-data variant is the default smoke test after infrastructure changes — it preserves both PostgreSQL and MinIO object storage. The preserve-DB variant preserves only the database (MinIO data is lost). The full-fresh variant tests first-install password generation and DB bootstrap. If any fails, `deploy-full.sh` is incomplete. Run the preserve-data variant before marking any infrastructure change as done.
 
 **The checklist** — Before marking a feature as deployed, verify:
 - [ ] Schema changes have an Alembic migration
@@ -170,7 +172,7 @@ The preserve-DB variant is the default smoke test after infrastructure changes. 
 - [ ] Cross-namespace Secrets are copied by deploy-full.sh, not created manually
 - [ ] Admin/management APIs expose all user-facing model fields
 - [ ] requirements.txt matches pyproject.toml dependencies (container builds use requirements.txt)
-- [ ] Golden test (preserve-DB): `scripts/uninstall-full.sh --skip-db --yes && scripts/deploy-full.sh` succeeds
+- [ ] Golden test (preserve-data): `scripts/uninstall-full.sh --skip-data --yes && scripts/deploy-full.sh` succeeds and S3-spilled content is retrievable
 - [ ] Golden test (full fresh): `scripts/uninstall-full.sh --yes && scripts/deploy-full.sh` succeeds on a new cluster
 
 ## Deploy Safety

@@ -1,7 +1,8 @@
 #!/bin/bash
 # WARNING: This script is destructive. It removes all MemoryHub
 # resources, including the database and all stored memories.
-# Use --skip-db to preserve the database.
+# Use --skip-db to preserve the database, --skip-data to preserve both
+# the database and object storage.
 #
 # CREDENTIAL DRIFT: When the DB namespace is deleted and recreated,
 # deploy-full.sh generates a new random password for memoryhub-pg-credentials.
@@ -12,7 +13,7 @@
 # also reads from the DB namespace, so credentials stay in sync even without
 # deploy-full.sh.
 #
-# Usage: scripts/uninstall-full.sh [--yes] [--skip-db] [--skip-tile] [--skip-models] [--no-backup]
+# Usage: scripts/uninstall-full.sh [--yes] [--skip-db] [--skip-data] [--skip-tile] [--skip-models] [--no-backup]
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
@@ -25,9 +26,11 @@ UI_NAMESPACE="memoryhub-ui"
 RHOAI_NAMESPACE="redhat-ods-applications"
 EMBEDDING_MODEL_NAMESPACE="embedding-model"
 RERANKER_MODEL_NAMESPACE="reranker-model"
+STORAGE_NAMESPACE="memoryhub-storage"
 
 YES=false
 SKIP_DB=false
+SKIP_STORAGE=false
 SKIP_TILE=false
 SKIP_MODELS=false
 NO_BACKUP=false
@@ -77,14 +80,16 @@ parse_args() {
         case "$arg" in
             --yes)        YES=true ;;
             --skip-db)    SKIP_DB=true ;;
+            --skip-data)  SKIP_DB=true; SKIP_STORAGE=true ;;
             --skip-tile)  SKIP_TILE=true ;;
             --skip-models) SKIP_MODELS=true ;;
             --no-backup)  NO_BACKUP=true ;;
             -h|--help)
-                echo "Usage: $SCRIPT_NAME [--yes] [--skip-db] [--skip-tile] [--skip-models] [--no-backup]"
+                echo "Usage: $SCRIPT_NAME [--yes] [--skip-db] [--skip-data] [--skip-tile] [--skip-models] [--no-backup]"
                 echo ""
                 echo "  --yes           Skip all confirmation prompts (non-interactive / CI mode)"
                 echo "  --skip-db       Preserve the database namespace and its PVC (no memory loss)"
+                echo "  --skip-data     Preserve BOTH database AND object storage (no data loss)"
                 echo "  --skip-tile     Leave RHOAI tile artifacts in redhat-ods-applications"
                 echo "  --skip-models   Preserve embedding + reranker model namespaces"
                 echo "  --no-backup     Skip automatic pre-uninstall database backup"
@@ -136,7 +141,12 @@ confirm() {
     echo "      - ImageStream/memoryhub-ui"
     echo "      - BuildConfig/memoryhub-ui"
     echo "      - ServiceAccount/memoryhub-ui"
-    echo "    Namespace: $MCP_PROJECT  (MCP server + MinIO + Valkey)"
+    echo "    Namespace: $MCP_PROJECT  (MCP server + Valkey)"
+    if [ "$SKIP_STORAGE" = true ]; then
+        echo "    Object storage: PRESERVED  (--skip-data)"
+    else
+        echo "    Namespace: $STORAGE_NAMESPACE  (MinIO object storage — S3-SPILLED DATA LOSS)"
+    fi
     if [ "$SKIP_MODELS" = true ]; then
         echo "    Models: PRESERVED  (--skip-models)"
     else
@@ -322,6 +332,26 @@ remove_mcp_namespace() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 4a: Storage namespace
+# ---------------------------------------------------------------------------
+remove_storage_namespace() {
+    banner "4a. Storage Namespace ($STORAGE_NAMESPACE)"
+
+    if [ "$SKIP_STORAGE" = true ]; then
+        skipped "Storage namespace (--skip-data). S3-spilled content preserved."
+        return 0
+    fi
+
+    warn "Deleting $STORAGE_NAMESPACE — S3-SPILLED MEMORY CONTENT WILL BE LOST."
+    oc delete namespace --context "$CONTEXT" "$STORAGE_NAMESPACE" \
+        --ignore-not-found \
+        --wait=false
+
+    echo ""
+    echo -e "  ${GREEN}Namespace $STORAGE_NAMESPACE deletion initiated${RESET}"
+}
+
+# ---------------------------------------------------------------------------
 # Step 4b: Model namespaces
 # ---------------------------------------------------------------------------
 remove_model_namespaces() {
@@ -402,6 +432,11 @@ summary() {
     echo "    ${GREEN}✓${RESET} Namespace $UI_NAMESPACE"
     echo "    ${GREEN}✓${RESET} Legacy UI artifacts in $MCP_PROJECT"
     echo "    ${GREEN}✓${RESET} Namespace $MCP_PROJECT"
+    if [ "$SKIP_STORAGE" = false ]; then
+        echo "    ${GREEN}✓${RESET} Namespace $STORAGE_NAMESPACE (S3 data deleted)"
+    else
+        echo "    ${YELLOW}-${RESET} Namespace $STORAGE_NAMESPACE (preserved)"
+    fi
     if [ "$SKIP_MODELS" = false ]; then
         echo "    ${GREEN}✓${RESET} Namespace $EMBEDDING_MODEL_NAMESPACE"
         echo "    ${GREEN}✓${RESET} Namespace $RERANKER_MODEL_NAMESPACE"
@@ -439,6 +474,7 @@ main() {
     remove_ui_namespace
     remove_legacy_ui
     remove_mcp_namespace
+    remove_storage_namespace
     remove_model_namespaces
     remove_auth_namespace
     remove_db_namespace
