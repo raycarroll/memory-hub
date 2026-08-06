@@ -1,6 +1,6 @@
 #!/bin/bash
 # Full MemoryHub stack deployment to OpenShift.
-# Usage: scripts/deploy-full.sh [--skip-prereqs] [--skip-db] [--skip-storage]
+# Usage: scripts/deploy-full.sh [--skip-prereqs] [--skip-data]
 #                                [--skip-migrations] [--skip-mcp] [--skip-auth]
 #                                [--skip-ui] [--skip-tile] [--skip-models] [--gpu-models]
 set -euo pipefail
@@ -21,7 +21,7 @@ STORAGE_NAMESPACE="memoryhub-storage"
 DB_POD_LABEL="app.kubernetes.io/name=memoryhub-pg"
 
 SKIP_PREREQS=false
-SKIP_DB=false
+SKIP_DATA=false
 SKIP_MIGRATIONS=false
 SKIP_MCP=false
 SKIP_AUTH=false
@@ -29,7 +29,6 @@ SKIP_UI=false
 SKIP_TILE=false
 SKIP_MODELS=false
 GPU_MODELS=false
-SKIP_STORAGE=false
 SKIP_SMOKE_TEST=false
 RESTORE_FROM=""
 
@@ -108,14 +107,14 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-prereqs)    SKIP_PREREQS=true ;;
-            --skip-db)         SKIP_DB=true ;;
+            --skip-data)       SKIP_DATA=true ;;
+            --skip-db)         SKIP_DATA=true ;;
             --skip-migrations) SKIP_MIGRATIONS=true ;;
             --skip-mcp)        SKIP_MCP=true ;;
             --skip-auth)       SKIP_AUTH=true ;;
             --skip-ui)         SKIP_UI=true ;;
             --skip-tile)       SKIP_TILE=true ;;
             --skip-models)     SKIP_MODELS=true ;;
-            --skip-storage)    SKIP_STORAGE=true ;;
             --gpu-models)      GPU_MODELS=true ;;
             --skip-smoke-test) SKIP_SMOKE_TEST=true ;;
             --restore-from)
@@ -132,14 +131,14 @@ parse_args() {
                 echo "Usage: $SCRIPT_NAME [OPTIONS]"
                 echo ""
                 echo "  --skip-prereqs     Skip check-prereqs.sh (for known-good environments)"
-                echo "  --skip-db          Skip PostgreSQL deployment"
+                echo "  --skip-data        Skip PostgreSQL and MinIO deployment (data already present)"
+                echo "  --skip-db          Deprecated alias for --skip-data"
                 echo "  --skip-migrations  Skip Alembic migrations"
                 echo "  --skip-mcp         Skip MCP server deployment"
                 echo "  --skip-auth        Skip Auth server deployment"
                 echo "  --skip-ui          Skip UI deployment"
                 echo "  --skip-tile        Skip RHOAI OdhApplication tile"
                 echo "  --skip-models      Skip embedding + reranker model deployment"
-                echo "  --skip-storage     Skip MinIO object storage deployment"
                 echo "  --gpu-models       Use GPU model manifests instead of CPU (default: CPU)"
                 echo "  --skip-smoke-test  Skip post-deploy write/search/read verification"
                 echo "  --restore-from F   Restore database from a pg_dump file after DB deploy"
@@ -202,10 +201,10 @@ preflight() {
     echo -e "  ${GREEN}Preflight OK${RESET}"
     echo ""
     echo "  Deployment plan:"
-    echo "    PostgreSQL:  $([ "$SKIP_DB" = true ] && echo "skip" || echo "deploy")"
+    echo "    PostgreSQL:  $([ "$SKIP_DATA" = true ] && echo "skip" || echo "deploy")"
     echo "    Migrations:  $([ "$SKIP_MIGRATIONS" = true ] && echo "skip" || echo "run")"
     echo "    MCP server:  $([ "$SKIP_MCP" = true ] && echo "skip" || echo "deploy")"
-    echo "    MinIO:       $([ "$SKIP_STORAGE" = true ] && echo "skip" || echo "deploy")"
+    echo "    MinIO:       $([ "$SKIP_DATA" = true ] && echo "skip" || echo "deploy")"
     echo "    Valkey:      $([ "$SKIP_MCP" = true ] && echo "skip" || echo "deploy")"
     echo "    Models:      $([ "$SKIP_MODELS" = true ] && echo "skip" || ([ "$GPU_MODELS" = true ] && echo "deploy (GPU)" || echo "deploy (CPU)"))"
     echo "    Auth server: $([ "$SKIP_AUTH" = true ] && echo "skip" || echo "deploy")"
@@ -219,8 +218,8 @@ preflight() {
 deploy_postgresql() {
     banner "2. PostgreSQL"
 
-    if [ "$SKIP_DB" = true ]; then
-        skipped "PostgreSQL (--skip-db)"
+    if [ "$SKIP_DATA" = true ]; then
+        skipped "PostgreSQL (--skip-data)"
         return 0
     fi
 
@@ -342,8 +341,8 @@ run_migrations() {
 deploy_storage() {
     banner "3b. MinIO Object Storage"
 
-    if [ "$SKIP_STORAGE" = true ]; then
-        skipped "MinIO (--skip-storage)"
+    if [ "$SKIP_DATA" = true ]; then
+        skipped "MinIO (--skip-data)"
         return 0
     fi
 
@@ -482,8 +481,8 @@ deploy_models() {
 deploy_retention_cronjob() {
     banner "3c. Retention Enforcement CronJob"
 
-    if [ "$SKIP_DB" = true ]; then
-        skipped "Retention CronJob (DB skipped)"
+    if [ "$SKIP_DATA" = true ]; then
+        skipped "Retention CronJob (--skip-data)"
         return 0
     fi
 

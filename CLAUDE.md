@@ -157,12 +157,11 @@ Every change must be deployable from code without manual steps. When implementin
 
 **SCC grants** — MinIO and Valkey require `anyuid` SCC on their ServiceAccounts. The deploy script must grant this after applying the kustomize manifests. Without it, pods fail with SCC validation errors on fresh namespaces.
 
-**The golden test** — There are three variants; the first two must pass with zero manual intervention:
-- **Preserve-data** (recommended): `scripts/uninstall-full.sh --skip-data --yes && scripts/deploy-full.sh`
-- **Preserve-DB** (legacy, DB only): `scripts/uninstall-full.sh --skip-db --yes && scripts/deploy-full.sh`
+**The golden test** — Two variants; both must pass with zero manual intervention:
+- **Preserve-data**: `scripts/uninstall-full.sh --skip-data --yes && scripts/deploy-full.sh`
 - **Full fresh**: `scripts/uninstall-full.sh --yes && scripts/deploy-full.sh`
 
-The preserve-data variant is the default smoke test after infrastructure changes — it preserves both PostgreSQL and MinIO object storage. The preserve-DB variant preserves only the database (MinIO data is lost). The full-fresh variant tests first-install password generation and DB bootstrap. If any fails, `deploy-full.sh` is incomplete. Run the preserve-data variant before marking any infrastructure change as done.
+The preserve-data variant is the default smoke test after infrastructure changes — it preserves both PostgreSQL and MinIO object storage. `--skip-db` is a deprecated alias for `--skip-data`. The full-fresh variant tests first-install password generation and DB bootstrap. If either fails, `deploy-full.sh` is incomplete. Run the preserve-data variant before marking any infrastructure change as done. Use `scripts/test-golden-s3.sh` to verify S3-spilled content survives the preserve-data cycle.
 
 **The checklist** — Before marking a feature as deployed, verify:
 - [ ] Schema changes have an Alembic migration
@@ -179,7 +178,7 @@ The preserve-data variant is the default smoke test after infrastructure changes
 
 **Never delegate deploy or uninstall scripts to sub-agents.** `deploy-full.sh` and `uninstall-full.sh` can destroy the database and all stored memories. Run them in the main conversation context where the operator sees each command and can intervene. A terminal-worker sub-agent misinterpreted "run the full deployment" as "clean-slate install" and destroyed the production database (2026-05-19; recovered from backup).
 
-When deploying, always use `deploy-full.sh` directly (it preserves the existing DB by default). The golden test variants (`uninstall --skip-db` or full `uninstall`) are for verification, not routine deploys.
+When deploying, always use `deploy-full.sh` directly (it preserves the existing DB by default). The golden test variants (`uninstall --skip-data` or full `uninstall`) are for verification, not routine deploys.
 
 After restoring from backup, verify `alembic_version` matches the actual schema before running `upgrade head`. Backup dumps can have stale version markers that cause migrations to fail on duplicate columns.
 
