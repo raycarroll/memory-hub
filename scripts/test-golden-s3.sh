@@ -79,8 +79,10 @@ write_test_memory() {
     content="[golden-s3-test ${TEST_TAG}] "
     content+="This is a test memory for issue #395 — verifying that S3-spilled "
     content+="content survives the --skip-data golden test. "
+    local line_num=0
     while [ ${#content} -lt "$TEST_CONTENT_SIZE" ]; do
-        content+="The quick brown fox jumps over the lazy dog. "
+        content+="[${TEST_TAG} line ${line_num}] The quick brown fox jumps over the lazy dog. "
+        line_num=$((line_num + 1))
     done
     info "Content size: ${#content} bytes (threshold: 102400)"
 
@@ -161,31 +163,36 @@ verify_memory() {
         die "Read failed — memory may have been lost"
     }
 
-    local content_len has_tag
-    content_len=$(echo "$read_output" | python3 -c "
+    local has_tag storage_type full_available
+    eval "$(echo "$read_output" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 mem = d.get('data', d)
 c = mem.get('content') or ''
-print(len(c))
-")
-    has_tag=$(echo "$read_output" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-mem = d.get('data', d)
-c = mem.get('content') or ''
-print('true' if 'golden-s3-test' in c else 'false')
-")
+print(f'has_tag={\"true\" if \"golden-s3-test\" in c else \"false\"}')
+print(f'storage_type={mem.get(\"storage_type\", \"inline\")}')
+print(f'full_available={str(mem.get(\"full_available\", False)).lower()}')
+print(f'content_len={len(c)}')
+")"
 
     if [ "$has_tag" != "true" ]; then
         die "Memory content does not contain test tag — content may be corrupted or truncated"
     fi
 
-    if [ "$content_len" -lt "$TEST_CONTENT_SIZE" ]; then
-        die "Content length ($content_len) is less than expected ($TEST_CONTENT_SIZE) — content truncated"
+    if [ "$storage_type" = "s3" ]; then
+        info "Storage type: s3 (S3-spilled)"
+        if [ "$full_available" = "true" ]; then
+            info "Full content available: yes (S3 object intact)"
+        else
+            die "S3-spilled memory exists but full content NOT available — S3 data may be lost"
+        fi
+    else
+        if [ "$content_len" -lt "$TEST_CONTENT_SIZE" ]; then
+            die "Inline content length ($content_len) is less than expected ($TEST_CONTENT_SIZE)"
+        fi
+        info "Storage type: inline (content_len=$content_len)"
     fi
 
-    info "Content length: $content_len bytes (expected >= $TEST_CONTENT_SIZE)"
     info "Test tag present: yes"
 
     banner "5. Cleanup"
