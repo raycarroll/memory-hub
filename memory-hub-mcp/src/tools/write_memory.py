@@ -12,7 +12,6 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field, ValidationError
 
-from memoryhub_core.config import AppSettings
 from memoryhub_core.models.schemas import MemoryNodeCreate
 from memoryhub_core.services.campaign import get_campaigns_for_project
 from memoryhub_core.services.exceptions import (
@@ -589,8 +588,7 @@ async def write_memory(
         # Eager fact extraction via MCP sampling. Non-fatal -- the write
         # never fails on extraction failure.
         facts_extracted = None
-        app_settings = AppSettings()
-        embedding_max_chars = app_settings.embedding_max_tokens * 4
+        embedding_max_chars = embedding_service.max_tokens * 4
         is_oversized = len(content) > embedding_max_chars
 
         valid_extract_modes = {"eager", "off", "background", None}
