@@ -161,7 +161,7 @@ Every change must be deployable from code without manual steps. When implementin
 - **Preserve-data**: `scripts/uninstall-full.sh --skip-data --yes && scripts/deploy-full.sh`
 - **Full fresh**: `scripts/uninstall-full.sh --yes && scripts/deploy-full.sh`
 
-The preserve-data variant is the default smoke test after infrastructure changes — it preserves both PostgreSQL and MinIO object storage. `--skip-db` is a deprecated alias for `--skip-data`. The full-fresh variant tests first-install password generation and DB bootstrap. If either fails, `deploy-full.sh` is incomplete. Run the preserve-data variant before marking any infrastructure change as done. Use `scripts/test-golden-s3.sh` to verify S3-spilled content survives the preserve-data cycle.
+The preserve-data variant is the default smoke test after infrastructure changes — it preserves both PostgreSQL and MinIO object storage. `--skip-db` is a deprecated alias for `--skip-data`. The full-fresh variant tests first-install password generation and DB bootstrap. If either fails, `deploy-full.sh` is incomplete. Run the preserve-data variant before marking any infrastructure change as done. Use `scripts/test-golden-s3-preserve.sh` to verify S3-spilled content survives the preserve-data cycle.
 
 **The checklist** — Before marking a feature as deployed, verify:
 - [ ] Schema changes have an Alembic migration
