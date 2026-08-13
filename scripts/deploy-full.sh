@@ -209,7 +209,7 @@ preflight() {
     echo "    Models:      $([ "$SKIP_MODELS" = true ] && echo "skip" || ([ "$GPU_MODELS" = true ] && echo "deploy (GPU)" || echo "deploy (CPU)"))"
     echo "    Auth server: $([ "$SKIP_AUTH" = true ] && echo "skip" || echo "deploy")"
     echo "    UI:          $([ "$SKIP_UI" = true ] && echo "skip" || echo "deploy")"
-    echo "    RHOAI tile:  $([ "$SKIP_TILE" = true ] && echo "skip" || echo "apply")"
+    echo "    RHOAI tile:  $([ "$SKIP_TILE" = true ] && echo "skip" || echo "apply (if RHOAI installed)")"
 }
 
 # ---------------------------------------------------------------------------
@@ -693,8 +693,11 @@ deploy_ui() {
         die "UI deploy script not found: $ui_deploy"
     fi
 
+    local ui_args=()
+    if [ "$SKIP_TILE" = true ]; then ui_args+=(--skip-tile); fi
+
     info "Deploying UI (namespace: $UI_NAMESPACE)..."
-    if ! bash "$ui_deploy"; then
+    if ! bash "$ui_deploy" "${ui_args[@]}"; then
         die "UI deployment failed. Check output above."
     fi
 
@@ -703,37 +706,7 @@ deploy_ui() {
 }
 
 # ---------------------------------------------------------------------------
-# Section 7: RHOAI OdhApplication tile
-# ---------------------------------------------------------------------------
-deploy_tile() {
-    banner "7. RHOAI OdhApplication Tile"
-
-    if [ "$SKIP_TILE" = true ]; then
-        skipped "OdhApplication tile (--skip-tile)"
-        return 0
-    fi
-
-    local odh_manifest="$REPO_ROOT/memoryhub-ui/openshift/odh-application.yaml"
-    if [ ! -f "$odh_manifest" ]; then
-        die "OdhApplication manifest not found: $odh_manifest"
-    fi
-
-    if oc get crd odhapplications.dashboard.opendatahub.io --context "$CONTEXT" &>/dev/null; then
-        info "Applying OdhApplication CR to $RHOAI_NAMESPACE..."
-        if ! oc apply --context "$CONTEXT" -f "$odh_manifest" -n "$RHOAI_NAMESPACE"; then
-            die "Failed to apply OdhApplication manifest."
-        fi
-        echo ""
-        echo -e "  ${GREEN}RHOAI tile applied${RESET}"
-    else
-        warn "OdhApplication CRD not found — skipping dashboard tile (non-blocking)"
-        echo ""
-        echo -e "  ${YELLOW}RHOAI tile skipped (CRD not available)${RESET}"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Section 7b: Configure local client (API key for CLI/SDK)
+# Section 7: Configure local client (API key for CLI/SDK)
 # ---------------------------------------------------------------------------
 configure_local_client() {
     local users_cm="$REPO_ROOT/memory-hub-mcp/deploy/users-configmap.yaml"
@@ -964,7 +937,6 @@ main() {
     configure_local_client    # Write API key for CLI/SDK
     prepare_ui_infra          # SA + Secrets before UI
     deploy_ui
-    deploy_tile
     print_summary
     smoke_test
 
