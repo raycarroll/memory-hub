@@ -196,17 +196,33 @@ verify_memory() {
         die "Read failed — memory may have been lost"
     }
 
-    local has_tag storage_type full_available
-    eval "$(echo "$read_output" | python3 -c "
+    local has_tag storage_type full_available content_len
+    has_tag=$(echo "$read_output" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 mem = d.get('data', d)
 c = mem.get('content') or ''
-print(f'has_tag={\"true\" if \"golden-s3-test\" in c else \"false\"}')
-print(f'storage_type={mem.get(\"storage_type\", \"inline\")}')
-print(f'full_available={str(mem.get(\"full_available\", False)).lower()}')
-print(f'content_len={len(c)}')
-")"
+print('true' if 'golden-s3-test' in c else 'false')
+")
+    storage_type=$(echo "$read_output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mem = d.get('data', d)
+print(mem.get('storage_type', 'inline'))
+")
+    full_available=$(echo "$read_output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mem = d.get('data', d)
+print(str(mem.get('full_available', False)).lower())
+")
+    content_len=$(echo "$read_output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mem = d.get('data', d)
+c = mem.get('content') or ''
+print(len(c))
+")
 
     if [ "$has_tag" != "true" ]; then
         die "Memory content does not contain test tag — content may be corrupted or truncated"
@@ -262,8 +278,9 @@ run_golden_test() {
     info "Uninstall complete"
 
     info "Waiting for namespace termination..."
-    local ns wait_secs=0
+    local ns wait_secs total_wait=0
     for ns in memory-hub-mcp memoryhub-auth memoryhub-ui; do
+        wait_secs=0
         while oc get namespace --context "$CONTEXT" "$ns" &>/dev/null 2>&1; do
             if [ $wait_secs -ge 120 ]; then
                 die "Namespace $ns still terminating after 120s"
@@ -271,8 +288,9 @@ run_golden_test() {
             sleep 5
             wait_secs=$((wait_secs + 5))
         done
+        total_wait=$((total_wait + wait_secs))
     done
-    info "All namespaces terminated (${wait_secs}s)"
+    info "All namespaces terminated (${total_wait}s)"
 
     banner "Reinstall"
 
