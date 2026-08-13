@@ -693,11 +693,12 @@ deploy_ui() {
         die "UI deploy script not found: $ui_deploy"
     fi
 
-    local ui_args=()
-    if [ "$SKIP_TILE" = true ]; then ui_args+=(--skip-tile); fi
-
     info "Deploying UI (namespace: $UI_NAMESPACE)..."
-    if ! bash "$ui_deploy" "${ui_args[@]}"; then
+    if [ "$SKIP_TILE" = true ]; then
+        if ! bash "$ui_deploy" --skip-tile; then
+            die "UI deployment failed. Check output above."
+        fi
+    elif ! bash "$ui_deploy"; then
         die "UI deployment failed. Check output above."
     fi
 
