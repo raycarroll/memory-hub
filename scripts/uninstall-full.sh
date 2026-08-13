@@ -226,10 +226,19 @@ remove_tile() {
         return 0
     fi
 
-    info "Removing OdhApplication/memoryhub..."
-    oc delete odhapplication --context "$CONTEXT" memoryhub \
-        -n "$RHOAI_NAMESPACE" \
-        --ignore-not-found
+    if ! oc get namespace "$RHOAI_NAMESPACE" --context "$CONTEXT" &>/dev/null; then
+        info "RHOAI not installed ($RHOAI_NAMESPACE namespace not found) — skipping tile cleanup."
+        return 0
+    fi
+
+    if oc get crd odhapplications.dashboard.opendatahub.io --context "$CONTEXT" &>/dev/null; then
+        info "Removing OdhApplication/memoryhub..."
+        oc delete odhapplication --context "$CONTEXT" memoryhub \
+            -n "$RHOAI_NAMESPACE" \
+            --ignore-not-found
+    else
+        info "OdhApplication CRD not found — skipping tile removal."
+    fi
 
     info "Removing Route/memoryhub-ui..."
     oc delete route --context "$CONTEXT" memoryhub-ui \
