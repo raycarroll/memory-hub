@@ -33,6 +33,7 @@ SKIP_DATA=false
 SKIP_TILE=false
 SKIP_MODELS=false
 NO_BACKUP=false
+RHOAI_PRESENT=false
 
 START_TIME=$(date +%s)
 
@@ -124,7 +125,8 @@ confirm() {
     echo ""
     echo "  The following resources will be removed:"
     echo ""
-    if [ "$SKIP_TILE" = false ]; then
+    if [ "$SKIP_TILE" = false ] && oc get namespace --context "$CONTEXT" "$RHOAI_NAMESPACE" &>/dev/null; then
+        RHOAI_PRESENT=true
         echo "    RHOAI tile artifacts in $RHOAI_NAMESPACE"
         echo "      - OdhApplication/memoryhub"
         echo "      - Route/memoryhub-ui"
@@ -432,10 +434,12 @@ summary() {
     banner "Uninstall Complete"
     echo ""
     echo "  Resources removed:"
-    if [ "$SKIP_TILE" = false ]; then
+    if [ "$SKIP_TILE" = true ]; then
+        echo "    ${YELLOW}-${RESET} RHOAI tile artifacts (skipped)"
+    elif [ "$RHOAI_PRESENT" = true ]; then
         echo "    ${GREEN}✓${RESET} RHOAI tile artifacts ($RHOAI_NAMESPACE)"
     else
-        echo "    ${YELLOW}-${RESET} RHOAI tile artifacts (skipped)"
+        echo "    ${YELLOW}-${RESET} RHOAI tile artifacts (not installed)"
     fi
     echo "    ${GREEN}✓${RESET} Namespace $UI_NAMESPACE"
     echo "    ${GREEN}✓${RESET} Legacy UI artifacts in $MCP_PROJECT"
