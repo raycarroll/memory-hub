@@ -435,31 +435,31 @@ summary() {
     echo ""
     echo "  Resources removed:"
     if [ "$SKIP_TILE" = true ]; then
-        echo "    ${YELLOW}-${RESET} RHOAI tile artifacts (skipped)"
+        echo -e "    ${YELLOW}-${RESET} RHOAI tile artifacts (skipped)"
     elif [ "$RHOAI_PRESENT" = true ]; then
-        echo "    ${GREEN}✓${RESET} RHOAI tile artifacts ($RHOAI_NAMESPACE)"
+        echo -e "    ${GREEN}✓${RESET} RHOAI tile artifacts ($RHOAI_NAMESPACE)"
     else
-        echo "    ${YELLOW}-${RESET} RHOAI tile artifacts (not installed)"
+        echo -e "    ${YELLOW}-${RESET} RHOAI tile artifacts (not installed)"
     fi
-    echo "    ${GREEN}✓${RESET} Namespace $UI_NAMESPACE"
-    echo "    ${GREEN}✓${RESET} Legacy UI artifacts in $MCP_PROJECT"
-    echo "    ${GREEN}✓${RESET} Namespace $MCP_PROJECT"
+    echo -e "    ${GREEN}✓${RESET} Namespace $UI_NAMESPACE"
+    echo -e "    ${GREEN}✓${RESET} Legacy UI artifacts in $MCP_PROJECT"
+    echo -e "    ${GREEN}✓${RESET} Namespace $MCP_PROJECT"
     if [ "$SKIP_DATA" = false ]; then
-        echo "    ${GREEN}✓${RESET} Namespace $STORAGE_NAMESPACE (S3 data deleted)"
+        echo -e "    ${GREEN}✓${RESET} Namespace $STORAGE_NAMESPACE (S3 data deleted)"
     else
-        echo "    ${YELLOW}-${RESET} Namespace $STORAGE_NAMESPACE (preserved)"
+        echo -e "    ${YELLOW}-${RESET} Namespace $STORAGE_NAMESPACE (preserved)"
     fi
     if [ "$SKIP_MODELS" = false ]; then
-        echo "    ${GREEN}✓${RESET} Namespace $EMBEDDING_MODEL_NAMESPACE"
-        echo "    ${GREEN}✓${RESET} Namespace $RERANKER_MODEL_NAMESPACE"
+        echo -e "    ${GREEN}✓${RESET} Namespace $EMBEDDING_MODEL_NAMESPACE"
+        echo -e "    ${GREEN}✓${RESET} Namespace $RERANKER_MODEL_NAMESPACE"
     else
-        echo "    ${YELLOW}-${RESET} Model namespaces (skipped)"
+        echo -e "    ${YELLOW}-${RESET} Model namespaces (skipped)"
     fi
-    echo "    ${GREEN}✓${RESET} Namespace $AUTH_PROJECT"
+    echo -e "    ${GREEN}✓${RESET} Namespace $AUTH_PROJECT"
     if [ "$SKIP_DATA" = false ]; then
-        echo "    ${GREEN}✓${RESET} Namespace $DB_NAMESPACE (data deleted)"
+        echo -e "    ${GREEN}✓${RESET} Namespace $DB_NAMESPACE (data deleted)"
     else
-        echo "    ${YELLOW}-${RESET} Namespace $DB_NAMESPACE (preserved)"
+        echo -e "    ${YELLOW}-${RESET} Namespace $DB_NAMESPACE (preserved)"
     fi
     echo ""
     warn "Namespace deletions are async. Verify with:"
