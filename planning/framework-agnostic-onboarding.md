@@ -33,8 +33,21 @@ MemoryHub integrations fall into two categories:
 | **OpenClaw** | Plugin (#490) | Plugin-driven | `openclaw.json` | ❌ Manual | Shipped |
 | **OpenCode** | Plugin (#549) | Plugin-driven | `opencode.json` | ❌ Manual | PR open |
 | **Goose** | Unknown | Likely instruction | YAML (unverified) | ❌ None | Not started |
+| **DeepSeek Harness** | None (native MCP) | Instruction-driven | `cordis.yml` | ❌ None | Not started |
 | **OGX** | None | Instruction | `config.yaml` | ❌ None | Speculative |
 | **LibreChat** | Planned (#82) | MCP-discovered | `librechat.yaml` | ❌ None | Not started |
+
+**DeepSeek Harness is instruction-driven even though it is plugin-architected.**
+Everything in dsh is a plugin, including its MCP client, which makes it easy to
+file under Pattern 2. The distinction that matters for onboarding is whether a
+*MemoryHub* plugin carries the behavior, and none exists. Setting up dsh means
+adding a `@deepseek-ai/dsh-mcp-client` entry to `cordis.yml` that points at our
+streamable-HTTP endpoint with an `Authorization` header, then writing an
+`AGENTS.md`. The instruction half needs no extra configuration: the
+`@deepseek-ai/dsh-agent-instructions` plugin is on by default in `dsh-base` and
+loads `AGENTS.md` and `CLAUDE.md` from `$DSH_HOME` and from the project root down
+to the working directory. This row is verified against the package READMEs in
+`deepseek-ai/deepseek-harness`; the Goose row above is still unverified.
 
 **The problem:** Only Claude Code has automated setup. Every other framework requires manual config file editing, plugin installation, and following scattered docs.
 
@@ -593,13 +606,18 @@ Each adapter becomes its own issue with clear prerequisites:
 **Medium Priority (MCP-capable, no plugin yet):**
 4. **Goose adapter** — Add MCP server to YAML config + write instructions
    - Prerequisite: Verify Goose MCP config pattern
-5. **LibreChat adapter** — Configure MCP server with OAuth (#82)
+5. **DeepSeek Harness adapter** — Append a `@deepseek-ai/dsh-mcp-client` entry to
+   `cordis.yml` + write `AGENTS.md`
+   - Prerequisite: none. The config format and the instruction-file chain are both
+     documented upstream, so this is the cheapest of the instruction-driven adapters
+     to write.
+6. **LibreChat adapter** — Configure MCP server with OAuth (#82)
    - Prerequisite: LibreChat integration complete
 
 **Low Priority (speculative):**
-6. **OGX adapter** — YAML config + Responses API snippet
+7. **OGX adapter** — YAML config + Responses API snippet
    - Prerequisite: Working OGX/LlamaStack integration
-7. **Auto-detection** — `--framework auto` using adapter `detect()` methods
+8. **Auto-detection** — `--framework auto` using adapter `detect()` methods
 
 Each follow-up is ~80 lines of adapter code + ~100 lines of tests.
 
