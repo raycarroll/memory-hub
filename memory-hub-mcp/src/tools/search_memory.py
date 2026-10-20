@@ -47,7 +47,6 @@ from memoryhub_core.services.valkey_client import (
     get_valkey_client,
 )
 from src.core.app import mcp
-from src.core.audit import record_event
 from src.core.authz import (
     PROJECT_ISOLATION_ENABLED,
     ROLE_ISOLATION_ENABLED,
@@ -56,6 +55,7 @@ from src.core.authz import (
     get_claims_from_context,
     resolve_tenant,
 )
+from src.tools._audit_helpers import record_audit_event
 from src.tools._deps import (
     get_db_session,
     get_embedding_service,
@@ -76,7 +76,13 @@ _CHARS_PER_TOKEN = 4
 
 def _to_stub(read: MemoryNodeRead) -> MemoryNodeStub:
     """Project a MemoryNodeRead down to its stub form, preserving parent_id
-    so branch handling continues to work after a full→stub degradation."""
+    so branch handling continues to work after a full→stub degradation.
+
+    Must carry over content_type/source -- omitting them silently degrades
+    to the schema defaults (content_type=None, source="agent") for any
+    result trimmed to stub form under token-budget/cache-ordering, even
+    though the full MemoryNodeRead being degraded already has the real
+    values (#552 follow-up)."""
     return MemoryNodeStub(
         id=read.id,
         parent_id=read.parent_id,
@@ -87,6 +93,8 @@ def _to_stub(read: MemoryNodeRead) -> MemoryNodeStub:
         has_children=read.has_children,
         has_rationale=read.has_rationale,
         domains=read.domains,
+        content_type=read.content_type,
+        source=read.source,
         created_at=read.created_at,
     )
 
@@ -327,6 +335,7 @@ async def _backfill_compiled_entries(
     project_ids: set[str] | None = None,
     role_names: set[str] | None = None,
     current_only: bool = True,
+    content_type: str | None = None,
 ) -> list[tuple[MemoryNodeRead | MemoryNodeStub, float]]:
     """Ensure compiled entries are present in the result set.
 
@@ -343,6 +352,11 @@ async def _backfill_compiled_entries(
 
     Returns the (possibly extended) results list. No-op if Valkey is
     unavailable or no epoch exists.
+
+    content_type (#552): backfilled entries must respect the same
+    content_type filter as the main search, or a compiled entry of a
+    different type (e.g. a behavioral pattern) can leak into a
+    content_type-filtered result set (e.g. content_type="procedural").
     """
     compilation_owner = owner_id if owner_id is not None else "*"
     valkey = get_valkey_client()
@@ -393,6 +407,7 @@ async def _backfill_compiled_entries(
         campaign_ids=campaign_ids,
         project_ids=project_ids,
         role_names=role_names,
+        content_type=content_type,
     )
     if scope_filters is None:
         return results
@@ -442,6 +457,8 @@ async def _backfill_compiled_entries(
                     branch_type=node.branch_type,
                     has_children=has_children,
                     has_rationale=has_rationale,
+                    content_type=node.content_type,
+                    source=getattr(node, "source", "agent"),
                     created_at=node.created_at,
                 ),
                 0.0,
@@ -692,9 +709,9 @@ async def search_memory(
         str | None,
         Field(
             description=(
-                "(Advanced) Filter by content type. 'declarative' for facts and "
+                "(Advanced) Filter by content type. 'knowledge' for facts and "
                 "preferences (default search scope), 'behavioral' for demonstrated "
-                "patterns. Omit to search all types."
+                "patterns, 'procedural' for directed-graph runbooks. Omit to search all types."
             ),
         ),
     ] = None,
@@ -912,22 +929,31 @@ async def search_memory(
             f"Valid scopes: {', '.join(sorted(VALID_SCOPES))}."
         )
 
-    record_event(
-        event_type="memory.search",
-        actor_id=claims["sub"],
-        driver_id=claims["sub"],
-        scope=scope or "all",
-        owner_id=owner_id or claims["sub"],
-        memory_id=None,
-        decision="allowed",
-        metadata={"query": query[:200], "max_results": max_results},
-    )
-
-    # mode='full_only' overrides weight_threshold so the service never stubs.
-    effective_weight_threshold = 0.0 if mode == "full_only" else weight_threshold
+    # effective_k: the actual result count limit the server will apply.
+    # Pydantic already validated max_results to [1, 200], so this is
+    # the value the server uses. Upstream caps (harness env, SDK config)
+    # happen before the request reaches us — this field lets consumers
+    # compare what the server received against what they originally wanted.
+    effective_k = max_results
 
     session, gen = await get_db_session()
     try:
+        await record_audit_event(
+            event_type="memory.search",
+            actor_id=claims["sub"],
+            driver_id=claims["sub"],
+            scope=scope or "all",
+            owner_id=owner_id or claims["sub"],
+            memory_id=None,
+            decision="allowed",
+            tenant_id=tenant,
+            metadata={"query": query[:200], "max_results": max_results},
+            session=session,
+        )
+
+        # mode='full_only' overrides weight_threshold so the service never stubs.
+        effective_weight_threshold = 0.0 if mode == "full_only" else weight_threshold
+
         if ctx:
             await ctx.info(f"Searching memories: '{query}'")
 
@@ -1027,7 +1053,12 @@ async def search_memory(
                     pass  # best-effort
 
         # Count all matching memories under the same filter set so the agent
-        # can tell whether more matches exist beyond this page.
+        # can tell whether more matches exist beyond this page. Must mirror
+        # every filter passed to search_memories above -- content_type,
+        # source, and exclude_source were dropped here (pre-#552 bug,
+        # surfaced by procedural content_type filtering); has_more/
+        # total_matching were silently wrong for any content_type- or
+        # source-filtered search, not just procedural ones.
         total_matching = await count_search_matches(
             session=session,
             tenant_id=tenant,
@@ -1039,7 +1070,10 @@ async def search_memory(
             project_ids=project_ids,
             role_names=role_names,
             entity_names=entities,
+            content_type=content_type,
             temporal_status=temporal_status,
+            source=source,
+            exclude_source=exclude_source,
         )
 
         # Apply post-retrieval domain boost only on the non-focus path.
@@ -1054,6 +1088,7 @@ async def search_memory(
                 "results": [],
                 "total_matching": total_matching,
                 "has_more": False,
+                "effective_k": effective_k,
                 "message": (
                     "No memories found matching your query. "
                     "Try broader search terms or remove scope/owner filters."
@@ -1090,6 +1125,7 @@ async def search_memory(
                 project_ids=project_ids,
                 role_names=role_names,
                 current_only=current_only,
+                content_type=content_type,
             )
 
         # --- Cache-optimized assembly (default, #175) ---
@@ -1307,6 +1343,7 @@ async def search_memory(
             "total_matching": total_matching,
             "has_more": total_matching > len(formatted),
             "content_mode": content_mode,
+            "effective_k": effective_k,
         }
         if compilation_meta is not None:
             response["compilation_hash"] = compilation_meta["compilation_hash"]

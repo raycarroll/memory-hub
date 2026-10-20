@@ -523,6 +523,8 @@ async def update_memory(
     new_weight = data.weight if data.weight is not None else old_node.weight
     new_metadata = data.metadata if data.metadata is not None else old_node.metadata_
     new_domains = data.domains if data.domains is not None else old_node.domains
+    new_content_type = data.content_type if data.content_type is not None else old_node.content_type
+    new_source = data.source if data.source is not None else old_node.source
 
     app_settings = AppSettings()
 
@@ -578,7 +580,7 @@ async def update_memory(
 
     new_node = MemoryNode(
         id=new_id,
-        logical_id=old_node.logical_id or old_node.id,
+        logical_id=old_node.logical_id,
         content=db_content,
         stub=stub,
         scope=old_node.scope,
@@ -592,6 +594,8 @@ async def update_memory(
         branch_type=old_node.branch_type,
         metadata_=new_metadata,
         domains=new_domains,
+        content_type=new_content_type,
+        source=new_source,
         relevant_until=new_relevant_until,
         embedding=embedding,
         is_current=True,
@@ -646,7 +650,7 @@ async def update_memory(
         copied_id = uuid.uuid4()
         copied_child = MemoryNode(
             id=copied_id,
-            logical_id=child.logical_id or copied_id,
+            logical_id=child.logical_id,
             content=child.content,
             stub=child.stub,
             scope=child.scope,
@@ -925,6 +929,10 @@ def _build_search_filters(
 
     if content_type is not None:
         filters.append(MemoryNode.content_type == content_type)
+    else:
+        # Synopsis nodes are loaded separately by the persona/session path.
+        # Keep them out of normal retrieval unless explicitly requested.
+        filters.append(MemoryNode.content_type != "synopsis")
 
     if source is not None:
         filters.append(MemoryNode.source == source)

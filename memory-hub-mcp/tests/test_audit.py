@@ -7,7 +7,28 @@ logger with the expected fields.
 import json
 import logging
 
+import pytest
+
 from src.core.audit import record_event
+
+AUDIT_LOGGER = "memoryhub.audit"
+
+
+def audit_events(caplog):
+    """The JSON audit events emitted to the stub audit logger.
+
+    caplog captures at the root, so records from memoryhub_core's PostgreSQL
+    persistence path land in ``caplog.records`` too. With no database reachable
+    that path logs an ERROR, which the server correctly swallows (audit is
+    fire-and-forget) but which a bare ``len(caplog.records)`` would miscount as
+    a second audit event. Filtering by logger name makes the assertion measure
+    what it names.
+    """
+    return [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == AUDIT_LOGGER
+    ]
 
 
 def test_record_event_logs_json(caplog):
@@ -123,3 +144,204 @@ def test_record_event_session_denied(caplog):
     event = json.loads(caplog.records[0].message)
     assert event["event_type"] == "session.denied"
     assert event["decision"] == "denied"
+
+
+# ==============================================================================
+# Phase 0: Integration tests for denied operations
+# ==============================================================================
+
+
+class TestFireAndForget:
+    """Verify audit failures never block tool operations (audit.py:8)."""
+
+    def test_logger_exception_does_not_propagate(self):
+        """Audit logging failures are swallowed (fire-and-forget)."""
+        from unittest.mock import patch
+
+        with patch("src.core.audit.logger.info") as mock_logger:
+            mock_logger.side_effect = RuntimeError("Simulated logger failure")
+
+            # Should not raise despite the logger failure
+            record_event(
+                event_type="memory.write",
+                actor_id="user-alice",
+                driver_id="user-alice",
+                scope="user",
+                owner_id="user-alice",
+                memory_id=None,
+                decision="allowed",
+            )
+
+            # The exception was raised inside record_event, proving it tried to log
+            assert mock_logger.called
+
+
+class TestDeniedOperationAudit:
+    """Verify denied operations emit decision='denied' audit events.
+
+    These tests use mocks to isolate the audit call sites without requiring
+    a full database setup. They verify that authorization failures trigger
+    audit events before raising ToolError.
+    """
+
+    def test_read_memory_denied(self, caplog):
+        """read_memory records decision='denied' when authorize_read fails."""
+        import pytest
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from src.tools.read_memory import read_memory
+
+        # Mock the authorization and service layers
+        mock_node = SimpleNamespace(
+            id="550e8400-e29b-41d4-a716-446655440000",
+            scope="user",
+            owner_id="user-bob",
+            tenant_id="default",
+        )
+
+        async def run_test():
+            with patch("src.tools.read_memory.get_claims_from_context") as mock_claims, \
+                 patch("src.tools.read_memory._read_memory") as mock_read, \
+                 patch("src.tools.read_memory.authorize_read") as mock_authz, \
+                 patch("src.tools.read_memory.get_db_session") as mock_db, \
+                 caplog.at_level(logging.INFO, logger="memoryhub.audit"):
+
+                mock_claims.return_value = {"sub": "user-alice", "scopes": ["memory:read"]}
+                mock_read.return_value = mock_node
+                mock_authz.return_value = False  # Authorization fails
+
+                # Mock database session context manager
+                mock_session = MagicMock()
+                mock_gen = MagicMock()
+                mock_db.return_value = (mock_session, mock_gen)
+
+                from fastmcp.exceptions import ToolError
+                with pytest.raises(ToolError, match="Not authorized"):
+                    await read_memory(memory_id="550e8400-e29b-41d4-a716-446655440000")
+
+                # Verify denied audit event was recorded
+                events = audit_events(caplog)
+                assert len(events) == 1
+                parsed = events[0]
+                assert parsed["event_type"] == "memory.read"
+                assert parsed["actor_id"] == "user-alice"
+                assert parsed["decision"] == "denied"
+                assert parsed["scope"] == "user"
+                assert parsed["owner_id"] == "user-bob"
+
+        import asyncio
+        asyncio.run(run_test())
+
+    def test_write_memory_denied_project_scope(self, caplog):
+        """write_memory records decision='denied' for non-member project write."""
+        import pytest
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.tools.write_memory import write_memory
+
+        async def run_test():
+            # With PROJECT_ISOLATION_ENABLED, write_memory opens a real DB
+            # session for the membership check *before* it reaches the
+            # authorization gate under test. Stub both so this stays a
+            # database-free unit test, as the class docstring promises.
+            with patch("src.tools.write_memory.get_claims_from_context") as mock_claims, \
+                 patch("src.tools.write_memory.authorize_write") as mock_authz, \
+                 patch("src.tools.write_memory.resolve_tenant") as mock_tenant, \
+                 patch("src.tools.write_memory.PROJECT_ISOLATION_ENABLED", True), \
+                 patch("src.tools.write_memory.get_db_session") as mock_db, \
+                 patch(
+                     "src.tools.write_memory.ensure_project_membership",
+                     new=AsyncMock(return_value=(["project-1"], False)),
+                 ), \
+                 caplog.at_level(logging.INFO, logger="memoryhub.audit"):
+
+                mock_db.return_value = (AsyncMock(), MagicMock())
+
+                mock_claims.return_value = {
+                    "sub": "user-alice",
+                    "scopes": ["memory:write"],
+                    "project_memberships": [],  # Not a member of any projects
+                }
+                mock_tenant.return_value = "default"
+                mock_authz.return_value = False  # Not authorized for project-1
+
+                from fastmcp.exceptions import ToolError
+                with pytest.raises(ToolError, match="Not authorized"):
+                    await write_memory(
+                        content="Test memory",
+                        scope="project",
+                        owner_id="project-1",
+                        project_id="project-1",
+                    )
+
+                # Verify denied audit event was recorded
+                events = audit_events(caplog)
+                assert len(events) == 1
+                parsed = events[0]
+                assert parsed["event_type"] == "memory.write"
+                assert parsed["actor_id"] == "user-alice"
+                assert parsed["decision"] == "denied"
+                assert parsed["scope"] == "project"
+                assert parsed["owner_id"] == "project-1"
+
+        import asyncio
+        asyncio.run(run_test())
+
+    def test_manage_graph_create_relationship_denied_records_event(self, caplog):
+        """manage_graph create_relationship records denied event (Gap #2 fix).
+
+        Previously, authorization failures for source/target nodes did not emit
+        audit events. This test verifies the gap is closed: a denied event with
+        the expected fields is recorded before ToolError is raised.
+        """
+        import pytest
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from src.tools.manage_graph import manage_graph
+
+        mock_source = SimpleNamespace(
+            id="550e8400-e29b-41d4-a716-446655440000",
+            scope="user",
+            owner_id="user-bob",
+            tenant_id="default",
+        )
+
+        async def run_test():
+            with patch("src.tools.manage_graph.get_claims_from_context") as mock_claims, \
+                 patch("src.tools.manage_graph.read_memory_service") as mock_read, \
+                 patch("src.tools.manage_graph.authorize_read") as mock_authz, \
+                 patch("src.tools.manage_graph.get_db_session") as mock_db, \
+                 caplog.at_level(logging.INFO, logger="memoryhub.audit"):
+
+                mock_claims.return_value = {"sub": "user-alice", "scopes": ["memory:read"]}
+                mock_read.return_value = mock_source
+                mock_authz.return_value = False  # Can't read source node
+
+                mock_session = MagicMock()
+                mock_gen = MagicMock()
+                mock_db.return_value = (mock_session, mock_gen)
+
+                from fastmcp.exceptions import ToolError
+                with pytest.raises(ToolError, match="Not authorized"):
+                    await manage_graph(
+                        action="create_relationship",
+                        source_id="550e8400-e29b-41d4-a716-446655440000",
+                        target_id="660e8400-e29b-41d4-a716-446655440000",
+                        relationship_type="derived_from",
+                    )
+
+                # Gap #2 is fixed: denied event is recorded before ToolError
+                events = audit_events(caplog)
+                assert len(events) == 1
+                parsed = events[0]
+                assert parsed["event_type"] == "memory.relationship_created"
+                assert parsed["actor_id"] == "user-alice"
+                assert parsed["decision"] == "denied"
+                assert parsed["scope"] == "user"
+                assert parsed["owner_id"] == "user-bob"
+                assert parsed["metadata"]["failed_on"] == "source_id"
+
+        import asyncio
+        asyncio.run(run_test())

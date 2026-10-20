@@ -29,7 +29,7 @@ Deployment is automated via `deploy/deploy.sh` which stages a build context, tri
 
 | Tool | Purpose | Read/Write |
 |------|---------|------------|
-| `manage_graph(action="create_relationship", ...)` | Create directed edges between memories (derived_from, supersedes, conflicts_with, related_to). Use `conflicts_with` with merge metadata to suggest merges (consolidated from `suggest_merge`, #173) | Write |
+| `manage_graph(action="create_relationship", ...)` | Create directed edges between memories (derived_from, supersedes, conflicts_with, related_to, precedes, requires, alternative_to). `mentions` is system-managed. Use `conflicts_with` with merge metadata to suggest merges (consolidated from `suggest_merge`, #173) | Write |
 | `manage_graph(action="get_relationships", ...)` | Query edges for a node with optional provenance tracing | Read |
 | `manage_graph(action="get_similar", ...)` | Paged similar memory lookup by embedding similarity | Read |
 | `manage_curation(action="set_rule", ...)` | Create/update user-layer curation rules (dedup thresholds, custom regex) | Write |
@@ -86,7 +86,7 @@ Focus is fully optional. When `focus` is omitted (or `session_focus_weight ≤ 0
 
 The cross-encoder is graceful-fallback: if `MEMORYHUB_RERANKER_URL` is unset or unreachable, the response carries a `focus_fallback_reason` field documenting the fallback and ranking falls back to pure cosine. The system stays usable even when the reranker pod is unhealthy.
 
-Empirical benchmark methodology and the four-way comparison (NEW-1 RRF blend vs NEW-2 focus-augmented query vs NEW-3 rerank-only vs cosine baseline) live in [`research/agent-memory-ergonomics/two-vector-retrieval.md`](../../research/agent-memory-ergonomics/two-vector-retrieval.md). NEW-1 won; NEW-2 was eliminated for catastrophic cross-topic recall collapse; NEW-3 alone was neutral on the synthetic corpus.
+Empirical benchmark methodology and the four-way comparison (NEW-1 RRF blend vs NEW-2 focus-augmented query vs NEW-3 rerank-only vs cosine baseline) live in [`research/agent-memory-ergonomics/two-vector-retrieval.md`](https://github.com/redhat-ai-americas/memory-hub-scratchpad/blob/main/research/agent-memory-ergonomics/two-vector-retrieval.md). NEW-1 won; NEW-2 was eliminated for catastrophic cross-topic recall collapse; NEW-3 alone was neutral on the synthetic corpus.
 
 ## Campaign scope and domain tagging (#154)
 
@@ -121,7 +121,7 @@ All MCP tools raise `fastmcp.exceptions.ToolError` for failures. This sets
 the `is_error` flag on the MCP wire response — no tool returns error dicts.
 Error messages explain what went wrong AND how to fix it:
 
-- "Invalid relationship_type 'friends_with'. Must be one of: derived_from, supersedes, conflicts_with, related_to."
+- "Invalid relationship_type 'friends_with'. Must be one of: derived_from, supersedes, conflicts_with, related_to, precedes, requires, alternative_to."
 - "Write blocked by curation rule: secrets_scan. Content matches aws_access_key pattern (AKIA...MPLE)."
 - "Memory node abc-123 not found. Verify both source_id and target_id refer to existing, current memory nodes."
 
@@ -129,7 +129,7 @@ The SDK classifies these messages by prefix into typed exceptions:
 `NotFoundError`, `PermissionDeniedError`, `ValidationError`,
 `AuthenticationError`, `ConflictError`, and `CurationVetoError`.
 
-See [`planning/tool-error-standardization.md`](../../planning/archive/tool-error-standardization.md) for the full design note.
+See [`planning/tool-error-standardization.md`](https://github.com/redhat-ai-americas/memory-hub-scratchpad/blob/main/planning/archive/tool-error-standardization.md) for the full design note.
 
 Generic `except Exception` handlers in tools log at ERROR and scrub internal
 details from the raised `ToolError` message to prevent leaking SQL fragments
