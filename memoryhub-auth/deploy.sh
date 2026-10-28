@@ -180,13 +180,15 @@ echo "  Migrations complete."
 echo "→ Applying OpenShift resources..."
 apply_manifest
 
+
 # Build
 echo "→ Building container image..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR=$(mktemp -d)
 trap "rm -rf $BUILD_DIR" EXIT
 
-cp Containerfile requirements.txt "$BUILD_DIR/"
+cp Containerfile requirements.txt alembic.ini "$BUILD_DIR/"
+cp -R alembic "$BUILD_DIR/"
 cp conftest.py "$BUILD_DIR/" 2>/dev/null || true
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' --exclude='.mypy_cache' src/ "$BUILD_DIR/src/"
 
@@ -199,7 +201,6 @@ fi
 
 oc start-build --context "$CONTEXT" auth-server --from-dir="$BUILD_DIR" --follow -n "$PROJECT"
 
-# Resolve AUTH_ISSUER_URL now that the Route exists (created by the first apply).
 ROUTE_HOST=$(oc get route --context "$CONTEXT" auth-server -n "$PROJECT" -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
 if [ -n "$ROUTE_HOST" ]; then
     AUTH_ISSUER_URL="https://${ROUTE_HOST}"
@@ -209,12 +210,12 @@ else
     AUTH_ISSUER_URL="__AUTH_ISSUER__"
 fi
 
-# Re-apply manifest to re-resolve the :latest imagestream tag against the
-# digest the build just pushed AND embed the issuer URL.  The Deployment
+# Re-apply manifest to re-resolve the :latest ImageStream tag against the
+# selected image AND embed the issuer URL.  The Deployment
 # carries `alpha.image.policy.openshift.io/resolve-names: '*'`, which
 # rewrites the tag to a concrete digest at apply time and never re-resolves
 # on its own.  Without this re-apply, the next rollout would spin up a pod
-# on the digest :latest pointed at *before* the build (#88, manifestation
+# on the digest currently selected by the ImageStream (#88, manifestation
 # 3/4).
 echo "→ Re-applying manifest to re-resolve image digest..."
 apply_manifest

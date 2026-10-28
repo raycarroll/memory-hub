@@ -20,6 +20,9 @@ class RelationshipType(StrEnum):
     conflicts_with = "conflicts_with"
     related_to = "related_to"
     mentions = "mentions"  # Phase 2: memory -> entity (system-managed)
+    precedes = "precedes"  # procedural step ordering (#552)
+    requires = "requires"  # procedural precondition (#552)
+    alternative_to = "alternative_to"  # procedural branching path (#552)
 
 
 class MemoryScope(StrEnum):
@@ -35,11 +38,21 @@ class MemoryScope(StrEnum):
 
 
 class ContentType(StrEnum):
-    """Content classification for behavioral memory (#237)."""
+    """Content classification for memory nodes (#237, #552)."""
 
     EXPERIENTIAL = "experiential"
     KNOWLEDGE = "knowledge"
     BEHAVIORAL = "behavioral"
+    PROCEDURAL = "procedural"
+
+
+
+class UpstreamTrustLevel(StrEnum):
+    """Trust level of upstream content that produced this memory (#559)."""
+
+    TRUSTED = "trusted"
+    UNTRUSTED = "untrusted"
+    MIXED = "mixed"
 
 
 class CampaignStatus(StrEnum):
@@ -83,6 +96,10 @@ class MemoryNodeCreate(BaseModel):
     )
     content_type: ContentType = Field(default=ContentType.EXPERIENTIAL, description="Memory classification type")
     source: str | None = Field(default=None, description="Memory source: agent, dreaming, import")
+    upstream_trust_level: UpstreamTrustLevel = Field(
+        default=UpstreamTrustLevel.TRUSTED,
+        description="Trust level of upstream content: trusted, untrusted, or mixed",
+    )
     relevant_until: datetime | None = Field(
         default=None,
         description="Semantic expiry timestamp. NULL means evergreen or version-bound.",
@@ -107,6 +124,8 @@ class MemoryNodeUpdate(BaseModel):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     metadata: dict[str, Any] | None = None
     domains: list[str] | None = Field(default=None, description="Updated domain tags")
+    content_type: ContentType | None = None
+    source: str | None = None
 
 
 # -- Output schemas --
@@ -143,6 +162,7 @@ class MemoryNodeRead(BaseModel):
     domains: list[str] | None = None
     content_type: ContentType = ContentType.EXPERIENTIAL
     source: str = Field(default="agent", description="What produced this memory")
+    upstream_trust_level: str = Field(default="trusted", description="Trust level of upstream content")
     content_hash: str | None = None
     is_current: bool
     version: int
@@ -181,6 +201,7 @@ class MemoryNodeStub(BaseModel):
     domains: list[str] | None = None
     content_type: ContentType | None = None
     source: str = Field(default="agent", description="What produced this memory")
+    upstream_trust_level: str = Field(default="trusted", description="Trust level of upstream content")
     created_at: datetime | None = None  # needed for cache-optimized sort ordering (#175)
     content_truncated: bool = True
     full_available: bool = True

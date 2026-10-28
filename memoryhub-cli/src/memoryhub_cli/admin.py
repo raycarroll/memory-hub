@@ -168,7 +168,9 @@ def create_agent(
 
     if write_config:
         section = context or os.environ.get("MEMORYHUB_CONTEXT", "").strip() or "default"
-        write_credentials_section(section, data["api_key"])
+        # user_id may be present in the response when the agent is a human identity
+        user_id_to_save = data.get("user_id") or data.get("client_id")
+        write_credentials_section(section, data["api_key"], user_id=user_id_to_save)
         console.print(f"\n  [green]Secret written to {CREDENTIALS_FILE} [{section}][/green]")
 
 
@@ -275,6 +277,51 @@ def rotate_secret(
     )
     console.print(
         "\n  [dim]Save both values now. They will not be shown again.[/dim]"
+    )
+
+
+@admin_app.command("rotate-api-key")
+def rotate_api_key(
+    client_id: str = typer.Argument(..., help="Client ID of the agent"),
+    output: OutputFormat = typer.Option(
+        OutputFormat.table, "--output", "-o", help="Output format: table, json, quiet",
+    ),
+):
+    """Rotate only the API key for an agent, leaving the client secret unchanged.
+
+    The new API key is shown only once. Save it immediately.
+    """
+    admin_key = _get_admin_key(output)
+    auth_url = _get_auth_url(output)
+
+    async def _do():
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{auth_url}/admin/clients/{client_id}/rotate-api-key",
+                headers=_admin_headers(admin_key),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    try:
+        data = _run(_do())
+    except httpx.HTTPStatusError as exc:
+        _handle_http_error(exc, output)
+        return
+
+    if output == OutputFormat.json:
+        json_success(data)
+        return
+    if output == OutputFormat.quiet:
+        return
+
+    console.print(f"[green]API key rotated for {data['client_id']}.[/green]\n")
+    console.print(
+        f"  [yellow bold]New API Key:   {data['api_key']}[/yellow bold]"
+    )
+    console.print(
+        "\n  [dim]Save this key now. It will not be shown again.[/dim]"
     )
 
 

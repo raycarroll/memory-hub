@@ -4,7 +4,7 @@ Persistent, governed memory for AI agents. MemoryHub gives agents a shared memor
 
 **Try it now** -- `pip install "memoryhub[local]"` for a personal edition backed by SQLite (no infrastructure needed), or deploy the [cluster edition](docs/guides/cluster-install.md) on OpenShift AI for multi-agent governance, OAuth 2.1, and team-wide shared memory.
 
-Retrieval quality: 84.9% on [AMB PersonaMem](benchmarks/RESULTS.md) (2nd on the leaderboard), R@5=0.999 on LongMemEval. Requires Python 3.10+.
+Retrieval quality: 83.7% on [AMB PersonaMem 32k](benchmarks/RESULTS.md) (submitted to leaderboard, pending review), R@5=0.999 on LongMemEval oracle. Requires Python 3.10+.
 
 ## How to think about agent memory
 
@@ -29,6 +29,21 @@ claude mcp add memoryhub -- memoryhub mcp
 
 Start a new Claude Code session and your agent has persistent memory. See [`memoryhub-local/README.md`](memoryhub-local/README.md) for configuration, dreaming (offline fact extraction), and how it works under the hood.
 
+### Local full-stack development
+
+The cluster edition can also run locally for development without OpenShift.
+This mode uses PostgreSQL + pgvector, an HTTP MCP server, and the dashboard
+UI. It is a development mode of the cluster edition, not a third edition.
+
+```bash
+make local-install
+make local-up
+make local-down
+```
+
+See [`docs/guides/local-development.md`](docs/guides/local-development.md) for
+the Compose, Vite, local auth-service, and integration-test workflows.
+
 ### Cluster edition
 
 Full governed stack on OpenShift AI: PostgreSQL + pgvector, OAuth 2.1, embedding + reranker models, dashboard UI.
@@ -39,6 +54,18 @@ cd memory-hub
 oc login <cluster-api-url>      # cluster-admin required
 make install                    # full stack deploy (~10 min)
 ```
+
+To build application images without rolling out deployments, use:
+
+```bash
+make build                      # MCP, auth, and UI images
+make deploy                     # deploy existing ImageStream images
+make build-mcp                  # build one component
+make deploy-mcp                 # deploy one component without rebuilding
+```
+
+`make install` remains the combined build-and-deploy workflow. The equivalent
+deployment-only option is `scripts/deploy-full.sh --skip-builds`.
 
 The deploy script auto-creates a Python virtualenv, generates API keys, writes the first key to `~/.config/memoryhub/api-key`, and runs a smoke test. See the [cluster install guide](docs/guides/cluster-install.md) for prerequisites, deploy options, troubleshooting, and post-install setup.
 
@@ -62,7 +89,7 @@ Per-subsystem status and dependency graph: [`docs/SYSTEMS.md`](docs/SYSTEMS.md).
 
 | Component | Path | What it is |
 |---|---|---|
-| **MCP server** | [`memory-hub-mcp/`](memory-hub-mcp/) | FastMCP 3 server exposing memory operations over streamable-HTTP. Four action-dispatch tools (compact profile, default) or 13 individual tools (full profile). The primary agent surface. |
+| **MCP server** | [`memory-hub-mcp/`](memory-hub-mcp/) | FastMCP 3 server exposing memory operations over streamable-HTTP. Five tools in compact profile (default), including four action-dispatch tools, or 14 tools in full profile. The primary agent surface. |
 | **Server-side library** | [`src/memoryhub_core/`](src/memoryhub_core/) | SQLAlchemy models, service layer, embedding integration, RBAC enforcement (`core/authz.py`). Distribution name `memoryhub-core`; import name `memoryhub_core`. The MCP server, BFF, alembic migrations, and the seed-OAuth-clients script all import from here. |
 | **Python SDK** | [`sdk/`](sdk/) | `pip install memoryhub` -- typed async client wrapping the MCP tools. OAuth 2.1 token management is automatic. See [`sdk/README.md`](sdk/README.md). |
 | **CLI** | [`memoryhub-cli/`](memoryhub-cli/) | `pip install memoryhub-cli` -- terminal client for search/read/write/delete plus `memoryhub config init` for generating project-level `.memoryhub.yaml` and `.claude/rules/memoryhub-loading.md` rule files. |
@@ -70,6 +97,7 @@ Per-subsystem status and dependency graph: [`docs/SYSTEMS.md`](docs/SYSTEMS.md).
 | **Curation agents** | [`memoryhub-agents/`](memoryhub-agents/) | Background agents (Fact Checker, Trace Reviewer) running on Valkey job queues with leader election. |
 | **Dashboard UI** | [`memoryhub-ui/`](memoryhub-ui/) | React + PatternFly 6 frontend behind a FastAPI BFF, deployed as a single container. Six panels: Memory Graph, Status Overview, Users & Agents, Client Management, Curation Rules, Contradiction Log. OAuth-proxy sidecar in front of OpenShift login. |
 | **Auth service** | [`memoryhub-auth/`](memoryhub-auth/) | Standalone OAuth 2.1 authorization server. FastAPI with `client_credentials` and `refresh_token` grants, RSA-2048 JWT signing, JWKS endpoint, admin client management API. |
+| **Agent-host integrations** | [`integrations/`](integrations/) | Native plugins for agent hosts: [OpenClaw](integrations/openclaw/DEPLOY.md) and [opencode](integrations/opencode/README.md). Each wraps the MCP client with host-side auth, auto-recall injection, and the memory protocol. |
 | **Database migrations** | [`alembic/`](alembic/) | Schema migrations for the server-side library. PostgreSQL with the pgvector extension. |
 | **Design docs** | [`docs/`](docs/) | Subsystem designs, the agent-memory-ergonomics design cluster, package layout, auth and identity model. Start at [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
 | **Planning** | [`planning/`](planning/) | In-flight designs for unimplemented features (operator, observability, org-ingestion) and the LlamaStack integration plan. |

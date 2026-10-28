@@ -1,4 +1,4 @@
-.PHONY: install run-local test test-local deploy clean help
+.PHONY: install run-local run-local-http test test-local deploy clean help
 
 # Variables
 VENV ?= .venv
@@ -16,11 +16,13 @@ help:
 	@echo "Local Development:"
 	@echo "  make install     - Install dependencies"
 	@echo "  make run-local   - Run server locally (STDIO mode)"
+	@echo "  make run-local-http - Run server locally over streamable HTTP"
 	@echo "  make test-local  - Test with cmcp locally"
 	@echo "  make test        - Run pytest suite"
 	@echo ""
 	@echo "OpenShift Deployment (always to namespace: $(NAMESPACE)):"
-	@echo "  make deploy      - Build + deploy via deploy/deploy.sh"
+	@echo "  make build       - Build the image without deploying"
+	@echo "  make deploy      - Deploy the existing ImageStream image"
 	@echo "  make clean       - Remove from OpenShift"
 	@echo ""
 	@echo "Other:"
@@ -39,6 +41,11 @@ run-local: install
 	@echo "Test with: cmcp '$(VENV)/bin/python -m src.main' tools/list"
 	MCP_TRANSPORT=stdio MCP_HOT_RELOAD=1 $(VENV)/bin/python -m src.main
 
+# Run locally over streamable HTTP for the dashboard and SDK development.
+run-local-http: install
+	@echo "Starting MCP server in streamable HTTP mode on http://localhost:8080/mcp/..."
+	MCP_TRANSPORT=http MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_PORT=8080 MCP_HTTP_PATH=/mcp/ $(VENV)/bin/python run_local.py
+
 # Test locally with cmcp
 test-local:
 	@echo "Testing MCP server with cmcp..."
@@ -49,6 +56,10 @@ test-local:
 test:
 	$(VENV)/bin/pytest tests/ -v
 
+# Build the OpenShift image without changing the Deployment.
+build:
+	./deploy/build.sh
+
 # Deploy to OpenShift (namespace is hardcoded in deploy/deploy.sh)
 deploy:
 	./deploy/deploy.sh
@@ -56,6 +67,7 @@ deploy:
 # Clean up OpenShift deployment
 clean:
 	@echo "Cleaning up namespace: $(NAMESPACE)"
+	@oc delete --context $(MEMORYHUB_CONTEXT) -f deploy/buildconfig.yaml -n $(NAMESPACE) --ignore-not-found=true || echo "Build resources not deployed or already cleaned"
 	@oc delete --context $(MEMORYHUB_CONTEXT) -f deploy/openshift.yaml -n $(NAMESPACE) --ignore-not-found=true || echo "Not deployed or already cleaned"
 	@oc delete --context $(MEMORYHUB_CONTEXT) -f deploy/users-configmap.yaml -n $(NAMESPACE) --ignore-not-found=true || true
 

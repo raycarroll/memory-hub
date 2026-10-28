@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import warnings
 from importlib.metadata import version as pkg_version
@@ -42,6 +43,7 @@ from memoryhub_cli.output import (
     handle_error,
     json_success,
 )
+from memoryhub_cli.persona import persona_app
 from memoryhub_cli.project_config import (
     FocusSource,
     InitChoices,
@@ -94,6 +96,9 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 app.add_typer(admin_app, name="admin", help="Manage agents and OAuth clients")
+app.add_typer(
+    persona_app, name="persona", help="Persona compilation and standing profile management"
+)
 app.add_typer(export_app, name="export", help="Export memories to external formats")
 
 graph_app = typer.Typer(
@@ -294,13 +299,28 @@ def search(
         None, "--domain", help="Domain tags to boost",
     ),
     content_type: str | None = typer.Option(
-        None, "--content-type", help="Filter by content type: declarative or behavioral",
+        None,
+        "--content-type",
+        help="Filter by content type: experiential, knowledge, behavioral, procedural",
     ),
     source: str | None = typer.Option(
         None, "--source", help="Filter by source: agent, dreaming, import",
     ),
     exclude_source: str | None = typer.Option(
         None, "--exclude-source", help="Exclude memories from a source (e.g. dreaming)",
+    ),
+    current_step_id: str | None = typer.Option(
+        None,
+        "--current-step-id",
+        help=(
+            "Current procedural step UUID. When set, skip ranking and return "
+            "localized guidance. The query is required and ignored."
+        ),
+    ),
+    max_hops: int = typer.Option(
+        2,
+        "--max-hops",
+        help="Neighborhood size in edges. Used only with --current-step-id. Default 2, cap 5.",
     ),
     output: OutputFormat = typer.Option(
         OutputFormat.table, "--output", "-o",
@@ -318,6 +338,8 @@ def search(
                 project_id=_project_id, domains=domains or None,
                 content_type=content_type,
                 source=source, exclude_source=exclude_source,
+                current_step_id=current_step_id,
+                max_hops=max_hops,
             )
 
     result = _run_command(_do(), output)
@@ -329,6 +351,16 @@ def search(
         return
     if output == OutputFormat.compact:
         _print_compact(result.results, _project_id)
+        return
+
+    if result.query_ignored:
+        console.print(  # noqa: T201
+            "[yellow]Query ignored.[/yellow] Localized guidance for the current step:"
+        )
+        text = result.results[0].content if result.results else ""
+        console.print(text)  # noqa: T201
+        if result.results and result.results[0].hop_count is not None:
+            console.print(f"[dim]hop_count={result.results[0].hop_count}[/dim]")  # noqa: T201
         return
 
     if not result.results:
@@ -367,7 +399,9 @@ def list_memories(
         None, "--project-id", "-p", help="Project ID",
     ),
     content_type: str | None = typer.Option(
-        None, "--content-type", help="Filter by content type: declarative or behavioral",
+        None,
+        "--content-type",
+        help="Filter by content type: experiential, knowledge, behavioral, procedural",
     ),
     output: OutputFormat = typer.Option(
         OutputFormat.table, "--output", "-o", help="Output format: table, json, quiet, compact",
@@ -534,7 +568,9 @@ def write(
         None, "--domain", help="Domain tags",
     ),
     content_type: str | None = typer.Option(
-        None, "--content-type", help="Content type: declarative (default) or behavioral",
+        None,
+        "--content-type",
+        help="Content type: experiential (default), knowledge, behavioral, or procedural",
     ),
     output: OutputFormat = typer.Option(
         OutputFormat.table, "--output", "-o", help="Output format: table, json, quiet",
@@ -1255,7 +1291,13 @@ def config_regenerate(
 def graph_relate(
     source_id: str = typer.Argument(..., help="Source memory UUID"),
     target_id: str = typer.Argument(..., help="Target memory UUID"),
-    relationship_type: str = typer.Argument(..., help="Relationship type label"),
+    relationship_type: str = typer.Argument(
+        ...,
+        help=(
+            "Relationship type: derived_from, supersedes, conflicts_with, "
+            "related_to, precedes, requires, alternative_to"
+        ),
+    ),
     project_id: str | None = typer.Option(
         None, "--project-id", "-p", help="Project ID for campaign access",
     ),
@@ -1347,6 +1389,43 @@ def graph_list(
         table.add_row(dir_arrow, related, rel.relationship_type, created)
 
     console.print(table)  # noqa: T201
+
+
+@graph_app.command("guidance")
+def graph_guidance(
+    node_id: str = typer.Argument(..., help="Current procedural step UUID"),
+    max_hops: int = typer.Option(
+        2, "--max-hops", help="Neighborhood size in edges. Default 2, cap 5.",
+    ),
+    project_id: str | None = typer.Option(
+        None, "--project-id", "-p", help="Project ID for campaign access",
+    ),
+    output: OutputFormat = typer.Option(
+        OutputFormat.table, "--output", "-o", help="Output format: table, json, quiet",
+    ),
+):
+    """Localized guidance for one procedural step, plus the neighborhood the model saw."""
+    client = _get_client(output)
+    _project_id = project_id or _get_project_id_default()
+
+    async def _do():
+        async with client:
+            return await client.get_guidance(
+                node_id, max_hops=max_hops, project_id=_project_id,
+            )
+
+    result = _run_command(_do(), output)
+
+    if output == OutputFormat.json:
+        json_success(result.model_dump())
+        return
+    if output == OutputFormat.quiet:
+        return
+
+    console.print(result.guidance_text)  # noqa: T201
+    console.print(f"[dim]hop_count={result.hop_count}[/dim]")  # noqa: T201
+    if result.omitted_count:
+        console.print(f"[dim]omitted_count={result.omitted_count}[/dim]")  # noqa: T201
 
 
 @graph_app.command("similar")
@@ -1756,6 +1835,23 @@ def session_status(
         p.get("project_id", p) if isinstance(p, dict) else p
         for p in result.get("projects", [])
     ]
+
+    # Persist user_id so load-persona.sh can auto-detect it.
+    if user_id and user_id != "-":
+        try:
+            import os
+
+            from memoryhub_cli.config import (
+                MEMORYHUB_CONTEXT_ENV,
+                read_credentials_section,
+                write_credentials_section,
+            )
+            section = os.environ.get(MEMORYHUB_CONTEXT_ENV, "").strip() or "default"
+            creds = read_credentials_section() or {}
+            if creds.get("api_key") and creds.get("user_id") != user_id:
+                write_credentials_section(section, creds["api_key"], creds.get("url"), user_id)
+        except Exception:
+            pass  # Never block session status display for credential persistence
 
     console.print(f"Session: {user_id} ({name})")  # noqa: T201
     console.print(f"  Scopes: {', '.join(scopes) if scopes else '-'}")  # noqa: T201
@@ -2568,6 +2664,189 @@ async def _run_dream(model, url, api_key, thread_id, dry_run, output):
         console.print(
             f"\n[bold]Done.[/bold] {total_extracted} memories extracted, "
             f"{total_failures} failures across {len(results)} thread(s)."
+        )
+
+
+# ── Turn-level hooks (#313) ──────────────────────────────────────────────────
+
+
+@app.command()
+def rebias(
+    message: str = typer.Argument(
+        None, help="User message text (reads from stdin if omitted)",
+    ),
+    max_results: int = typer.Option(10, "--max", "-n", help="Maximum memories to return"),
+    project_id: str | None = typer.Option(
+        None, "--project-id", "-p", help="Project ID",
+    ),
+    output: OutputFormat = typer.Option(
+        OutputFormat.compact, "--output", "-o",
+        help="Output format: compact (default), json, quiet",
+    ),
+):
+    """Search for memories relevant to a user message and print for context injection.
+
+    Designed for pre-turn hooks (e.g., Claude Code UserPromptSubmit).
+    Reads the user's message, runs a relevance search, and outputs
+    results in compact format suitable for additionalContext injection.
+
+    Accepts input as:
+      - A positional argument: memoryhub rebias "the user message"
+      - Piped stdin (plain text): echo "message" | memoryhub rebias
+      - Piped stdin (JSON with 'prompt' field): Claude Code hook payload
+
+    Exits 0 on all failures for graceful degradation.
+    """
+    if message is None:
+        if sys.stdin.isatty():
+            raise typer.Exit(0)
+        raw = sys.stdin.read().strip()
+        if not raw:
+            raise typer.Exit(0)
+        # Try parsing as JSON (Claude Code hook payload has a 'prompt' field)
+        try:
+            payload = json.loads(raw)
+            message = payload.get("prompt", "") if isinstance(payload, dict) else raw
+        except (json.JSONDecodeError, ValueError):
+            message = raw
+
+    if not message:
+        raise typer.Exit(0)
+
+    _project_id = project_id or _get_project_id_default()
+
+    try:
+        client = _get_client(OutputFormat.quiet)
+
+        async def _do():
+            async with client:
+                return await client.search(
+                    message, max_results=max_results,
+                    project_id=_project_id,
+                )
+
+        result = asyncio.run(_do())
+    except (SystemExit, Exception) as exc:
+        print(f"memoryhub rebias: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise typer.Exit(0)
+
+    if not result or not result.results:
+        raise typer.Exit(0)
+
+    if output == OutputFormat.json:
+        json_success(result.model_dump())
+        return
+    if output == OutputFormat.quiet:
+        return
+
+    _print_compact(result.results, _project_id)
+
+
+@app.command()
+def extract(
+    response: str = typer.Argument(
+        None, help="Assistant response text (reads from stdin if omitted)",
+    ),
+    project_id: str | None = typer.Option(
+        None, "--project-id", "-p", help="Project ID",
+    ),
+    session_id: str | None = typer.Option(
+        None, "--session-id", help="Session ID for provenance tracking",
+    ),
+    output: OutputFormat = typer.Option(
+        OutputFormat.quiet, "--output", "-o",
+        help="Output format: quiet (default), json, table",
+    ),
+):
+    """Extract facts, decisions, and preferences from a model response.
+
+    Designed for post-turn hooks (e.g., Claude Code Stop).
+    Reads the model's response, extracts candidate memories via the
+    SDK extraction pipeline, and writes high-confidence candidates
+    automatically. Deduplicates against existing memories.
+
+    Accepts input as:
+      - A positional argument: memoryhub extract "the response text"
+      - Piped stdin (plain text): echo "response" | memoryhub extract
+      - Piped stdin (JSON with 'last_assistant_message' field): Claude Code Stop payload
+
+    Exits 0 on all failures for graceful degradation.
+    """
+    if response is None:
+        if sys.stdin.isatty():
+            raise typer.Exit(0)
+        raw = sys.stdin.read().strip()
+        if not raw:
+            raise typer.Exit(0)
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                response = payload.get("last_assistant_message", "") or payload.get("content", "")
+                if session_id is None:
+                    session_id = payload.get("session_id")
+            else:
+                response = raw
+        except (json.JSONDecodeError, ValueError):
+            response = raw
+
+    if not response or len(response) < 20:
+        raise typer.Exit(0)
+
+    _project_id = project_id or _get_project_id_default()
+
+    try:
+        client = _get_client(OutputFormat.quiet)
+
+        async def _do():
+            from memoryhub.extraction.extractors import (
+                DecisionTraceExtractor,
+                PreferenceExtractor,
+                RelationshipExtractor,
+            )
+            from memoryhub.extraction.models import TraceEvent
+            from memoryhub.extraction.pipeline import ExtractionPipeline
+
+            async with client:
+                pipeline = ExtractionPipeline(
+                    client=client,
+                    extractors=[
+                        DecisionTraceExtractor(),
+                        PreferenceExtractor(),
+                        RelationshipExtractor(),
+                    ],
+                    project_id=_project_id,
+                    auto_write=True,
+                    scope="user",
+                )
+
+                event = TraceEvent.assistant_message(
+                    content=response,
+                    metadata={"session_id": session_id} if session_id else None,
+                )
+                return await pipeline.observe(event)
+
+        result = asyncio.run(_do())
+    except (SystemExit, Exception) as exc:
+        print(f"memoryhub extract: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise typer.Exit(0)
+
+    if output == OutputFormat.json:
+        json_success({
+            "candidates": len(result.candidates),
+            "written": result.written,
+            "filtered": len(result.filtered),
+            "reviewed": len(result.reviewed),
+        })
+        return
+    if output == OutputFormat.quiet:
+        return
+
+    written = len(result.written)
+    filtered = len(result.filtered)
+    if written or filtered:
+        console.print(  # noqa: T201
+            f"[green]Extracted:[/green] {written} written, "
+            f"{filtered} duplicates filtered"
         )
 
 

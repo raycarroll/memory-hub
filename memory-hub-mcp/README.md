@@ -49,9 +49,16 @@ notifications without polling. Push wiring is non-fatal — if Valkey is
 unreachable, registration still succeeds and the agent falls back to
 pull-only loading.
 
-When the server is deployed behind a JWT-issuing auth server, session
-registration is a no-op: the JWT's `sub` claim is used directly and the
-push subscriber starts automatically.
+API-key registration requires a stateful MCP transport session and fails
+closed if FastMCP cannot provide a stable session ID. The canonical HTTP server
+passes `stateless_http=False` to `mcp.run`; keep this setting when API-key
+authentication is enabled. Stateless HTTP requests cannot use
+`register_session` with an API key.
+
+With JWT authentication, each request is authenticated from its token, so
+API-key registration is unnecessary. Calling `register_session` still creates
+per-connection session metadata and starts the push subscriber; that optional
+session setup also requires a stateful transport.
 
 **Parameters:** `api_key` (str, required — format `mh-dev-<username>-<year>`)
 
@@ -167,7 +174,10 @@ Relationships are immutable (create or delete, never update).
 
 **Parameters:** `source_id` (UUID str), `target_id` (UUID str),
 `relationship_type` (`derived_from` | `supersedes` | `conflicts_with` |
-`related_to`), `metadata` (dict, optional).
+`related_to` | `precedes` | `requires` | `alternative_to`). `mentions` is
+system-managed and cannot be created here. `precedes` / `requires` /
+`alternative_to` encode procedural-graph step topology (#552). `metadata`
+(dict, optional).
 
 ##### `get_relationships`
 
@@ -287,6 +297,8 @@ for the deployment invariants that apply across all MemoryHub components
 | `MCP_HTTP_PORT` | `8080` | HTTP port |
 | `MCP_HTTP_PATH` | `/mcp/` | HTTP endpoint path |
 | `MCP_LOG_LEVEL` | `INFO` | Logging level |
+| `MEMORYHUB_CORS_ORIGINS` | `*` | CORS origin list (comma-separated); `*` permits all origins |
+| `MEMORYHUB_VALKEY_URL` | unset | Optional Valkey connection URL (`redis://host:port/db`) for session-focus persistence and broadcast notifications. If unset, focus tools work but without persistence; `register_session` succeeds but falls back to pull-only (no push notifications). Format: `redis://memoryhub-valkey.memory-hub-mcp.svc.cluster.local:6379/0` on OpenShift. |
 
 ## Testing
 

@@ -16,6 +16,25 @@ from typing import Annotated, Any, Literal
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from src.core.app import mcp
+from src.core.authz import (
+    PROJECT_ISOLATION_ENABLED,
+    ROLE_ISOLATION_ENABLED,
+    AuthenticationError,
+    authorize_read,
+    build_authorized_scopes,
+    get_claims_from_context,
+    resolve_tenant,
+)
+from src.tools._audit_helpers import record_audit_event
+from src.tools._deps import (
+    get_db_session,
+    get_embedding_service,
+    get_reranker_service,
+    get_s3_adapter,
+    release_db_session,
+)
+from src.tools._guidance import run_guidance, search_guidance_response
 
 from memoryhub_core.models.memory import MemoryNode
 from memoryhub_core.models.schemas import MemoryNodeRead, MemoryNodeStub, MemoryScope
@@ -30,6 +49,7 @@ from memoryhub_core.services.exceptions import (
     EmbeddingContentTooLargeError,
     EmbeddingServiceError,
     EmbeddingServiceUnavailableError,
+    MembershipNotFoundError,
 )
 from memoryhub_core.services.memory import (
     _build_search_filters,
@@ -40,28 +60,14 @@ from memoryhub_core.services.memory import (
     search_memories_with_focus,
 )
 from memoryhub_core.services.pattern import PatternSignal, detect_patterns
-from memoryhub_core.services.project import get_projects_for_user
+from memoryhub_core.services.project import (
+    assert_project_membership,
+    get_projects_for_user_in_tenant,
+)
 from memoryhub_core.services.role import get_roles_for_user
 from memoryhub_core.services.valkey_client import (
     ValkeyUnavailableError,
     get_valkey_client,
-)
-from src.core.app import mcp
-from src.core.audit import record_event
-from src.core.authz import (
-    PROJECT_ISOLATION_ENABLED,
-    ROLE_ISOLATION_ENABLED,
-    AuthenticationError,
-    build_authorized_scopes,
-    get_claims_from_context,
-    resolve_tenant,
-)
-from src.tools._deps import (
-    get_db_session,
-    get_embedding_service,
-    get_reranker_service,
-    get_s3_adapter,
-    release_db_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,7 +82,13 @@ _CHARS_PER_TOKEN = 4
 
 def _to_stub(read: MemoryNodeRead) -> MemoryNodeStub:
     """Project a MemoryNodeRead down to its stub form, preserving parent_id
-    so branch handling continues to work after a full→stub degradation."""
+    so branch handling continues to work after a full→stub degradation.
+
+    Must carry over content_type/source -- omitting them silently degrades
+    to the schema defaults (content_type=None, source="agent") for any
+    result trimmed to stub form under token-budget/cache-ordering, even
+    though the full MemoryNodeRead being degraded already has the real
+    values (#552 follow-up)."""
     return MemoryNodeStub(
         id=read.id,
         parent_id=read.parent_id,
@@ -87,6 +99,8 @@ def _to_stub(read: MemoryNodeRead) -> MemoryNodeStub:
         has_children=read.has_children,
         has_rationale=read.has_rationale,
         domains=read.domains,
+        content_type=read.content_type,
+        source=read.source,
         created_at=read.created_at,
     )
 
@@ -117,6 +131,27 @@ def _apply_domain_boost(
     return boosted
 
 
+_TAINTED_LEVELS = frozenset({"untrusted", "mixed"})
+
+
+def _taint_entry(item: MemoryNodeRead | MemoryNodeStub) -> dict[str, Any] | None:
+    """Build taint metadata when the memory's upstream content is not fully trusted."""
+    trust = getattr(item, "upstream_trust_level", "trusted")
+    if trust not in _TAINTED_LEVELS:
+        return None
+    return {
+        "tainted": True,
+        "sources": [getattr(item, "source", "agent")],
+    }
+
+
+def _inject_taint(entry: dict[str, Any], item: MemoryNodeRead | MemoryNodeStub) -> None:
+    """Add taint metadata to a formatted entry dict when applicable."""
+    taint = _taint_entry(item)
+    if taint is not None:
+        entry["taint"] = taint
+
+
 def _estimate_tokens(payload: dict[str, Any]) -> int:
     """Estimate the token cost of a serialized result entry."""
     return max(1, len(json.dumps(payload, default=str)) // _CHARS_PER_TOKEN)
@@ -143,6 +178,7 @@ def _compact_entry(
     entry["content_truncated"] = item.content_truncated
     entry["full_available"] = item.full_available
     entry["source"] = getattr(item, "source", "agent")
+    _inject_taint(entry, item)
     if relevance_score is not None:
         entry["relevance_score"] = round(relevance_score, 4)
     return entry
@@ -178,6 +214,7 @@ def _format_entry(
     entry = item.model_dump(mode="json")
     entry["result_type"] = entry_type
     entry["relevance_score"] = round(relevance_score, 4)
+    _inject_taint(entry, item)
     # Guide agents from chunk hits to the parent memory's full content
     if item.branch_type == "chunk" and item.parent_id is not None:
         entry["parent_hint"] = (
@@ -188,6 +225,7 @@ def _format_entry(
         branch_entries: list[dict[str, Any]] = []
         for branch_item, branch_score in nested_branches:
             branch_entry = branch_item.model_dump(mode="json")
+            _inject_taint(branch_entry, branch_item)
             branch_entry["result_type"] = (
                 "full" if isinstance(branch_item, MemoryNodeRead) else "stub"
             )
@@ -221,6 +259,7 @@ def _format_entry_cached(
     entry = item.model_dump(mode="json")
     entry["result_type"] = entry_type
     entry["is_appendix"] = is_appendix
+    _inject_taint(entry, item)
     if item.branch_type == "chunk" and item.parent_id is not None:
         entry["parent_hint"] = (
             f"This is a chunk of a larger memory. Call "
@@ -230,6 +269,7 @@ def _format_entry_cached(
         branch_entries: list[dict[str, Any]] = []
         for branch_item, _score in nested_branches:
             branch_entry = branch_item.model_dump(mode="json")
+            _inject_taint(branch_entry, branch_item)
             branch_entry["result_type"] = (
                 "full" if isinstance(branch_item, MemoryNodeRead) else "stub"
             )
@@ -327,6 +367,7 @@ async def _backfill_compiled_entries(
     project_ids: set[str] | None = None,
     role_names: set[str] | None = None,
     current_only: bool = True,
+    content_type: str | None = None,
 ) -> list[tuple[MemoryNodeRead | MemoryNodeStub, float]]:
     """Ensure compiled entries are present in the result set.
 
@@ -343,6 +384,11 @@ async def _backfill_compiled_entries(
 
     Returns the (possibly extended) results list. No-op if Valkey is
     unavailable or no epoch exists.
+
+    content_type (#552): backfilled entries must respect the same
+    content_type filter as the main search, or a compiled entry of a
+    different type (e.g. a behavioral pattern) can leak into a
+    content_type-filtered result set (e.g. content_type="procedural").
     """
     compilation_owner = owner_id if owner_id is not None else "*"
     valkey = get_valkey_client()
@@ -393,6 +439,7 @@ async def _backfill_compiled_entries(
         campaign_ids=campaign_ids,
         project_ids=project_ids,
         role_names=role_names,
+        content_type=content_type,
     )
     if scope_filters is None:
         return results
@@ -442,6 +489,9 @@ async def _backfill_compiled_entries(
                     branch_type=node.branch_type,
                     has_children=has_children,
                     has_rationale=has_rationale,
+                    content_type=node.content_type,
+                    source=getattr(node, "source", "agent"),
+                    upstream_trust_level=getattr(node, "upstream_trust_level", "trusted"),
                     created_at=node.created_at,
                 ),
                 0.0,
@@ -468,7 +518,10 @@ async def search_memory(
             description=(
                 "Natural language search query. Be specific -- "
                 "'container runtime preferences' works better than 'containers'. "
-                "The query is embedded and compared via cosine similarity."
+                "The query is embedded and compared via cosine similarity. "
+                "When current_step_id is set, this text is still required but is "
+                "not embedded or ranked. The response sets query_ignored to true "
+                "and lists it in ignored_parameters."
             ),
         ),
     ],
@@ -607,7 +660,9 @@ async def search_memory(
             description=(
                 "(Advanced) Hop depth for graph-enhanced retrieval. "
                 "When > 0, follows relationships from vector search results to "
-                "surface connected memories. 0 (default) disables graph traversal. Max 3."
+                "surface connected memories. 0 (default) disables graph traversal. Max 3. "
+                "Not applied when current_step_id is set; that path skips ranking. "
+                "A value greater than 0 on that path is listed in ignored_parameters."
             ),
             ge=0,
             le=3,
@@ -692,9 +747,9 @@ async def search_memory(
         str | None,
         Field(
             description=(
-                "(Advanced) Filter by content type. 'declarative' for facts and "
+                "(Advanced) Filter by content type. 'knowledge' for facts and "
                 "preferences (default search scope), 'behavioral' for demonstrated "
-                "patterns. Omit to search all types."
+                "patterns, 'procedural' for directed-graph runbooks. Omit to search all types."
             ),
         ),
     ] = None,
@@ -762,6 +817,37 @@ async def search_memory(
             ),
         ),
     ] = "stub",
+    current_step_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                "UUID of the procedural step the agent is on. When set, skip "
+                "embedding and ranking and return localized guidance for that "
+                "step's neighborhood (default 2 hops over precedes, requires, "
+                "and alternative_to). The id is the current step, not a procedure "
+                "root and not a search hit — pass it explicitly. "
+                "query is still required and is ignored; the response sets "
+                "query_ignored to true. focus, graph_depth, domains, entities, "
+                "and graph_relationship_types are not applied; any of those you "
+                "set are listed in ignored_parameters. "
+                "When omitted, search behaves exactly as before, including "
+                "content_type='procedural', which stays a ranked list of memories."
+            ),
+        ),
+    ] = None,
+    max_hops: Annotated[
+        int,
+        Field(
+            description=(
+                "Neighborhood size in edges for current_step_id. Default 2, "
+                "the paper's neighborhood. Counts edges from the current step "
+                "and includes distances 1 through this value. Hard cap 5. "
+                "Ignored unless current_step_id is set."
+            ),
+            ge=0,
+            le=5,
+        ),
+    ] = 2,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Search memories using semantic similarity.
@@ -770,6 +856,11 @@ async def search_memory(
       search_memory(query="deployment preferences")
     With project filter:
       search_memory(query="deployment preferences", project_id="my-project")
+    Procedural guidance for the step the agent is executing:
+      search_memory(query="deploy the service", current_step_id="<step-uuid>")
+      The query is accepted and ignored (query_ignored: true). Ranking,
+      including graph_depth, does not run. Omit current_step_id to keep
+      the ranked list, including for content_type="procedural".
 
     By default, results are returned in cache-optimized order: a stable,
     deterministic ordering driven by compilation epochs (#175) that maximizes
@@ -842,51 +933,67 @@ async def search_memory(
     except AuthenticationError as exc:
         raise ToolError(str(exc)) from None
 
-    # Build RBAC visibility filter + resolve caller tenant for SQL-level
-    # isolation. Tenant filter is ALWAYS applied, independent of scopes.
-    authorized = build_authorized_scopes(claims)
+    # Resolve caller tenant for SQL-level isolation. Tenant filter
+    # is ALWAYS applied, independent of scopes.
     tenant = resolve_tenant(claims, tenant_id)
+    caller_id = claims["sub"]
+    project_ids: set[str] | None = None
 
     # Resolve campaign membership when project_id is provided. The
     # campaign_ids set feeds into _build_search_filters so campaign-scoped
     # memories for enrolled campaigns appear in results.
     campaign_ids: set[str] | None = None
+
+    # An explicit project ID must be used to verify membership before resolving
+    # campaign access. Project-memory filtering is controlled by
+    # PROJECT_ISOLATION_ENABLED.
     if project_id:
         session_for_campaign, gen_for_campaign = await get_db_session()
         try:
+            await assert_project_membership(
+                session_for_campaign, caller_id, project_id, tenant
+            )
+        except MembershipNotFoundError:
+            raise ToolError("Not authorized for this project.") from None
+        else:
+            # Restrict project-scoped results to this project when isolation is on.
+            if PROJECT_ISOLATION_ENABLED:
+                project_ids = {project_id}
+
+            # Campaign visibility is resolved from the verified project.
             campaign_ids = await get_campaigns_for_project(
                 session_for_campaign, project_id, tenant,
             )
         finally:
             await release_db_session(gen_for_campaign)
 
-    # Resolve project memberships for the caller.
-    # When PROJECT_ISOLATION_ENABLED is False, skip resolution -- the
-    # search filter's generic branch handles project scope without
-    # scope_id filtering, and authorize_read returns True.
-    #
-    # When a specific project_id is given, restrict results to THAT
-    # project only.  Without project_id, use claims-based memberships
-    # (populated at registration by _resolve_project_memberships) as
-    # the primary source. Fall back to a DB query for sessions that
-    # predate the claims pipeline or when mid-session auto-enrollment
-    # needs the freshest state.
-    project_ids: set[str] | None = None
-    if PROJECT_ISOLATION_ENABLED:
-        if project_id:
-            project_ids = {project_id}
+    # Without an explicit project_id, resolve memberships only when project
+    # isolation is enabled. Prefer claims populated at registration; fall back
+    # to the database when claims are absent.
+    elif PROJECT_ISOLATION_ENABLED:
+        claims_memberships = claims.get("project_memberships", [])
+        if claims_memberships:
+            project_ids = set(claims_memberships)
         else:
-            claims_memberships = claims.get("project_memberships", [])
-            if claims_memberships:
-                project_ids = set(claims_memberships)
-            else:
-                session_for_project, gen_for_project = await get_db_session()
-                try:
-                    project_ids = await get_projects_for_user(
-                        session_for_project, claims["sub"],
-                    )
-                finally:
-                    await release_db_session(gen_for_project)
+            session_for_project, gen_for_project = await get_db_session()
+            try:
+                project_ids = await get_projects_for_user_in_tenant(
+                    session_for_project, claims["sub"], tenant,
+                )
+            finally:
+                await release_db_session(gen_for_project)
+
+    # Build scope filters using the resolved memberships, while preserving
+    # the caller's original scope.
+    effective_claims = claims
+    if PROJECT_ISOLATION_ENABLED:
+        effective_claims = {
+            **claims,
+            "project_memberships": sorted(project_ids or set())
+        }
+
+    # Build RBAC visibility filters after resolving project memberships.
+    authorized = build_authorized_scopes(effective_claims)
 
     # Resolve role assignments for the caller (table + JWT claims).
     role_names: set[str] | None = None
@@ -912,22 +1019,66 @@ async def search_memory(
             f"Valid scopes: {', '.join(sorted(VALID_SCOPES))}."
         )
 
-    record_event(
-        event_type="memory.search",
-        actor_id=claims["sub"],
-        driver_id=claims["sub"],
-        scope=scope or "all",
-        owner_id=owner_id or claims["sub"],
-        memory_id=None,
-        decision="allowed",
-        metadata={"query": query[:200], "max_results": max_results},
-    )
+    # effective_k: the actual result count limit the server will apply.
+    # Pydantic already validated max_results to [1, 200], so this is
+    # the value the server uses. Upstream caps (harness env, SDK config)
+    # happen before the request reaches us — this field lets consumers
+    # compare what the server received against what they originally wanted.
+    # The guidance path skips ranking, so it does not apply this limit.
+    effective_k = max_results
 
     # mode='full_only' overrides weight_threshold so the service never stubs.
     effective_weight_threshold = 0.0 if mode == "full_only" else weight_threshold
 
     session, gen = await get_db_session()
     try:
+        event_metadata: dict[str, Any] = {"query": query[:200], "max_results": max_results}
+        if current_step_id is not None:
+            event_metadata["current_step_id"] = current_step_id
+            event_metadata["query_ignored"] = True
+        await record_audit_event(
+            event_type="memory.search",
+            actor_id=claims["sub"],
+            driver_id=claims["sub"],
+            scope=scope or "all",
+            owner_id=owner_id or claims["sub"],
+            memory_id=None,
+            decision="allowed",
+            tenant_id=tenant,
+            metadata=event_metadata,
+            session=session,
+        )
+
+        if current_step_id is not None:
+            if ctx:
+                await ctx.info(f"Generating procedural guidance from step {current_step_id}")
+
+            def _can_read(node: Any) -> bool:
+                return authorize_read(
+                    claims,
+                    node,
+                    campaign_ids=campaign_ids,
+                    project_ids=project_ids,
+                    role_names=role_names,
+                )
+
+            guidance = await run_guidance(
+                current_step_id,
+                session,
+                tenant_id=tenant,
+                max_hops=max_hops,
+                authorize=_can_read,
+            )
+            return search_guidance_response(
+                guidance,
+                graph_depth=graph_depth,
+                focus=focus,
+                domains=domains,
+                entities=entities,
+                graph_relationship_types=graph_relationship_types,
+            )
+
+
         if ctx:
             await ctx.info(f"Searching memories: '{query}'")
 
@@ -1027,7 +1178,12 @@ async def search_memory(
                     pass  # best-effort
 
         # Count all matching memories under the same filter set so the agent
-        # can tell whether more matches exist beyond this page.
+        # can tell whether more matches exist beyond this page. Must mirror
+        # every filter passed to search_memories above -- content_type,
+        # source, and exclude_source were dropped here (pre-#552 bug,
+        # surfaced by procedural content_type filtering); has_more/
+        # total_matching were silently wrong for any content_type- or
+        # source-filtered search, not just procedural ones.
         total_matching = await count_search_matches(
             session=session,
             tenant_id=tenant,
@@ -1039,7 +1195,10 @@ async def search_memory(
             project_ids=project_ids,
             role_names=role_names,
             entity_names=entities,
+            content_type=content_type,
             temporal_status=temporal_status,
+            source=source,
+            exclude_source=exclude_source,
         )
 
         # Apply post-retrieval domain boost only on the non-focus path.
@@ -1054,6 +1213,7 @@ async def search_memory(
                 "results": [],
                 "total_matching": total_matching,
                 "has_more": False,
+                "effective_k": effective_k,
                 "message": (
                     "No memories found matching your query. "
                     "Try broader search terms or remove scope/owner filters."
@@ -1090,6 +1250,7 @@ async def search_memory(
                 project_ids=project_ids,
                 role_names=role_names,
                 current_only=current_only,
+                content_type=content_type,
             )
 
         # --- Cache-optimized assembly (default, #175) ---
@@ -1307,6 +1468,7 @@ async def search_memory(
             "total_matching": total_matching,
             "has_more": total_matching > len(formatted),
             "content_mode": content_mode,
+            "effective_k": effective_k,
         }
         if compilation_meta is not None:
             response["compilation_hash"] = compilation_meta["compilation_hash"]

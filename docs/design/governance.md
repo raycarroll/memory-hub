@@ -12,7 +12,7 @@ Fully automatic creation and update. The agent writes memories on behalf of its 
 
 ### Project-scope memories
 
-Any agent working within the project context can read and write project memories. The "working within" determination comes from the agent's project context (passed in the MCP request). Automatic creation, no approval required, but all operations are logged and auditable. Project owners can review and modify project memories.
+Project-scope memories are shared among project members. A `project_id` in an MCP request identifies the requested project; it does not by itself prove that the caller may access it. For reads, the caller must be a member of that project in the resolved tenant. `list_memory` and `search_memory` verify membership before resolving project campaigns or returning project-wide results. This check applies even when `MEMORYHUB_PROJECT_ISOLATION_ENABLED` is disabled: the flag controls result filtering, not membership authorization. Project write behavior and its existing auto-enrollment rules are unchanged. Operations remain logged and auditable.
 
 ### Campaign-scope memories
 
@@ -85,7 +85,7 @@ False positives are inevitable. A memory about "how to configure API key rotatio
 
 ## Policy Enforcement
 
-Enterprise policies about what can and cannot be stored in memory are expressed as MemoryPolicy CRDs (see [planning/operator.md](../../planning/operator.md)) and enforced by the governance engine.
+Enterprise policies about what can and cannot be stored in memory are expressed as MemoryPolicy CRDs (see [planning/operator.md](https://github.com/redhat-ai-americas/memory-hub-scratchpad/blob/main/planning/operator.md)) and enforced by the governance engine.
 
 Example policies:
 - "No source code in memories" -- content scanning for code patterns
